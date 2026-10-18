@@ -1,3 +1,5 @@
+[简体中文](zh-CN/README.md) | English
+
 # KohakuMoss docs
 
 | section | content |
@@ -10,4 +12,4 @@
 New users: [install](guides/install.md), then [your first LoRA](guides/first-lora.md);
 for a run from a few options, [the example scripts](../scripts/examples/README.md). The
 architecture charts (packages, train step, memory placement, kernel selection,
-multi-GPU) are in the [README](../README.md#architecture).
+multi-GPU) are in the [README](../README.en.md#architecture).

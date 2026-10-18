@@ -12,4 +12,4 @@
 
 新用户请先读[安装](guides/install.md)，再读[你的第一个 LoRA](guides/first-lora.md)；
 若想通过少量选项启动一次运行，请参阅[示例脚本](../../scripts/examples/README.md)。架构图
-（包结构、训练步骤、显存放置、内核选择、多 GPU）位于 [README](../../README.zh-CN.md#architecture)。
+（包结构、训练步骤、显存放置、内核选择、多 GPU）位于 [README](../../README.md#architecture)。
