@@ -32,7 +32,7 @@ def driver_cuda() -> tuple[int, int]:
     out = subprocess.run(
         ["nvidia-smi"], capture_output=True, text=True, check=True
     ).stdout
-    found = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", out)
+    found = re.search(r"CUDA(?: UMD)? Version:\s*(\d+)\.(\d+)", out)
     if found is None:
         raise SystemExit(
             "nvidia-smi reports no CUDA version: is a GPU runtime attached?"
