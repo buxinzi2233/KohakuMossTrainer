@@ -442,9 +442,9 @@ DiT 步骤峰值；卸载 / 环形流式传输一轮的峰值是 DiT 持久部�
 | --- | --- | --- |
 | `resident`（默认） | 权重在设备上 | 权重 + 激活 |
 | `offload` | 无（主机锁页副本） | 权重移入，执行后释放 |
-| `stream` | 无 | 编码器 / 解码器块经由 2 槽位环，其余部分每轮移入 |
+| `ring`（也接受 `stream`） | 无 | 编码器 / 解码器块经由 2 槽位环，其余部分每轮移入 |
 | `cpu` | 主机 | 主机（训练：仅离线潜变量缓存，即采样解码） |
-| `auto` | 能与 DiT 步骤预留空间共存的 resident / offload / stream 中最快者 | |
+| `auto` | 能与 DiT 步骤预留空间共存的 resident / offload / ring 中最快者 | |
 
 `offload` 在一轮开始时于计算流上从主机锁页副本复制权重，结束时丢弃设备副本。它们在
 该流上分配和读取，因此分配器只按该流的顺序将其内存交给后续工作，单轮结束无需设备同步
@@ -672,7 +672,7 @@ bf16 MMA 254 TFLOP/s（8192 x 8192 x 8192 GEMM）。常驻适配器步骤的 MMA
 | GPU AdamW（常驻、流式状态、流式块）、CPUAdamW、融合逐参数步骤 | 可用 | 可用 |
 | `MemorySession`、参数组 | 可用 | 可用 |
 | 量化基础权重（int8 / fp8）、流式量化基础权重 | 可用（sm89 上支持 fp8） | int8 |
-| 文本编码器放置（resident / offload / stream / cpu）、提前编码 | 可用 | 可用 |
+| 文本编码器放置（resident / offload / ring / cpu）、提前编码 | 可用 | 可用 |
 | 推理计划（`apply_inference_plan`） | 可用 | 可用 |
 | 多 GPU（DDP、FSDP2、流水线、线程式） | 设计上仅限 Linux（控制项校验会拒绝） | 同左 |
 

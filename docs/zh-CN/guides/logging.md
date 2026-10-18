@@ -106,7 +106,7 @@ wandb 静默运行，不捕获控制台输出；KohakuBoard 将自己的日志�
 - 运行摘要；
 - 模型 / 适配器 / 编码器的构建及其内存计划；
 - 随后的文本编码器与 VAE 放置日志行（[推理日志行](#what-sampling-shows)；
-  VAE 也可显示为 `stream (... 2-layer ring on
+  VAE 也可显示为 `ring (... 2-layer ring on
   cuda:0 ...)` 或 `cpu (... runs on the host)`；运行未保留这些组件时，显示
   `text encoder: not kept, TEXT_CACHE='offline'` / `VAE: not loaded, ...`）；
 - 内核预热（逐算子进度日志行、各算子及总计的墙钟时间）和

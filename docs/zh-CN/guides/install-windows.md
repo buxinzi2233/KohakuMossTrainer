@@ -122,7 +122,7 @@ WARNING：`<op> on <arch>/<dtype>: backend <failed> failed, using <next> (<n> bo
 | 内存配置档、自动规划器 | 可用 | |
 | 激活卸载、权重流式传输 | 可用 | WDDM 下 RTX 4090 的页锁定内存 H2D 19.7 / D2H 24.3 GB/s；可分页内存为 8.3 / 13.5 |
 | 梯度卸载、CPU AdamW、融合的逐参数更新步骤 | 可用 | |
-| 文本编码器：内核、批量 / 打包编码、resident / offload / stream / cpu 放置、提前编码 | 可用 | sm80+ 上使用与 Linux 相同的 Triton 内核；sm70 / sm75 上使用 TileLang |
+| 文本编码器：内核、批量 / 打包编码、resident / offload / ring / cpu 放置、提前编码 | 可用 | sm80+ 上使用与 Linux 相同的 Triton 内核；sm70 / sm75 上使用 TileLang |
 | Intel Arc（XPU）内核 | 可用 | Triton（Intel 后端）可在普通控制台中使用上述工具链构建；注册表会针对每个算子和形状，对 Triton 内核与 `torch.compile` 计时并绑定更快者（见[性能](../performance/README.md)）；fp16 `kahan` 优化器回写在 Arc 上会漂移（以 1e-5 更新 200 步后为 2e-3，而 CUDA 上低于 1e-5）；Arc 上请使用 bf16 参数或 `nearest` 回写 |
 | 多 GPU（DDP / FSDP2 / 流水线 / 线程式） | 不支持 | 按设计仅限 Linux |
 

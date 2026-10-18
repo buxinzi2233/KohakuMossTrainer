@@ -142,6 +142,25 @@ Windows 工具链和功能矩阵见 [install-windows.md](install-windows.md)。
   一致）。
 - `xpu` 可选依赖组使用 `kernels-xpu`（空：Intel 的 Triton 随 torch 提供）。
 
+<a id="where-caches-go"></a>
+## 缓存位置
+
+首次在某台机器上运行时，会构建并调优内核；结果保存在磁盘上，之后的运行可跳过这些工作。
+每种缓存都有自己的位置，且每个位置都可通过环境变量移动（适用于 home 或系统盘较小，或使用
+共享盘的情况）：
+
+| 缓存 | 默认位置 | 移动方式 |
+| --- | --- | --- |
+| KohakuMoss 内核缓存：调优表（`tuning/`）、设备探测（`devices/`）、记录的后端失败（`failures/`）、Windows 工具链（`toolchain/`） | `~/.cache/kohakumoss_kernels` | `KOHAKUMOSS_KERNEL_CACHE` |
+| LyCORIS 融合内核调优 | `~/.cache/lycoris_kernels` | `LYCORIS_KERNEL_CACHE_DIR` |
+| Triton 编译内核 | `~/.triton/cache` | `TRITON_CACHE_DIR`（或 `TRITON_HOME`） |
+| `torch.compile`（TorchInductor）图及其 Triton 内核 | `<系统临时目录>/torchinductor_<user>` | `TORCHINDUCTOR_CACHE_DIR`（设置后，其 Triton 内核跟随 `TRITON_CACHE_DIR`） |
+| TileLang 编译内核（sm70 / sm75） | `~/.tilelang/cache` | `TILELANG_CACHE_DIR` |
+| 数据集缓存：latents、文本嵌入、目录文件 | `<第一个数据集路径>/cache` | `CACHE_DIR` 配置项（[data.md](../concepts/data.md)） |
+
+- 删除内核缓存是安全的：下次运行会重新构建并调优。
+- 调优表按显卡、CUDA 和 torch 版本分别保存，因此一个缓存目录可被多张 GPU 和多个安装共享。
+
 <a id="extras"></a>
 ## 可选依赖组
 
@@ -156,8 +175,8 @@ Windows 工具链和功能矩阵见 [install-windows.md](install-windows.md)。
 | `optim` | `prodigyopt`、`schedulefree` | `OPTIMIZER="prodigy"` / `"schedule_free"` |
 | `parquet` | `pyarrow` | `parquet` 数据集来源 |
 | `board` / `wandb` | `kohakuboard` / `wandb` | `LOGGER="board"` / `"wandb"` |
-| `dev` | pytest、ruff、black、lpips | 测试和 lint |
-| `bench` | matplotlib、pandas | 基准测试 |
+| `dev` | pytest、ruff、black、lpips + `bench` | 测试和 lint（脚本测试会导入每个脚本） |
+| `bench` | matplotlib、pandas | 基准测试、fp16 修复图表 |
 | `baselines` | flash-linear-attention、causal-conv1d | 仅用于对比基准测试 |
 
 真实 GPU 基准测试矩阵（`scripts/bench/matrix/`，
