@@ -62,7 +62,8 @@ class ThreadedDriver(NativeDriver):
         with step.autocast():
             total = self.pipe.step(jobs, loss_fn, states).to(device) / scale
         bundle.observe(total)
-        return StepOut(total, denom, {"sigma_mean": preps[-1].sigma.mean()})
+        out = StepOut(total, denom, {"sigma_mean": preps[-1].sigma.mean()})
+        return out.detached()
 
 
 class PipelineDriver(NativeDriver):
@@ -88,9 +89,10 @@ class PipelineDriver(NativeDriver):
             loss = self.engine.step(mbs, float(max(count, 1)))
         total = loss / bundle.scaler.scale
         bundle.observe(total)
-        return StepOut(
+        out = StepOut(
             total, torch.tensor(count), {"sigma_mean": preps[-1].sigma.mean()}
         )
+        return out.detached()
 
     def _micro(self, hb, p):
         """Engine micro-batch: device tensors plus the host layout (the grid and
@@ -123,10 +125,22 @@ def to_host(obj):
     return obj
 
 
+HOST_GROUP: list = []
+
+
+def host_group():
+    """A gloo group over every rank for object collectives, made once (collective on
+    first use): gather_object on it moves the pickled bytes through host memory, not
+    the device."""
+    if not HOST_GROUP:
+        HOST_GROUP.append(dist.new_group(backend="gloo"))
+    return HOST_GROUP[0]
+
+
 def _gather_merge(full: dict, local: dict, world: int) -> dict:
     """Rank 0: `full` overwritten by every rank's `local` entries (others: `full`)."""
     out = [None] * world if dist.get_rank() == 0 else None
-    dist.gather_object(to_host(local), out, dst=0)
+    dist.gather_object(to_host(local), out, dst=0, group=host_group())
     if out is None:
         return full
     merged = dict(full)
@@ -157,7 +171,7 @@ class PipelineParts(Parts):
         }
         parts["ema"] = _gather_merge(ema, local_ema, self.world)
         out = [None] * self.world if self.rank == 0 else None
-        dist.gather_object(to_host(parts["optim"]), out, dst=0)
+        dist.gather_object(to_host(parts["optim"]), out, dst=0, group=host_group())
         parts["optim"] = {"ranks": out}
         return parts
 

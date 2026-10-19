@@ -19,13 +19,15 @@ One knob set (`kohakumoss.types.plans.TextEncoderPlan`) serves:
 | --- | --- | --- |
 | `memory` | `resident`, `offload`, `ring` (`stream` is accepted as the same value), `cpu`, `auto` | placement ([offload.md](offload.md#text-encoder)); the dataclass default is `resident` (`kohakumoss.types.plans`), and training and sampling resolve an unset `memory` to `auto` |
 | `free_after_use` | `False`, `True` | drop the model after its first pass |
-| `precision` | `compute`, `int8`, `fp8`, `fp8_compute`, `mxfp8` | weight storage and GEMMs ([Quantization](#quantization)) |
+| `precision` | `auto`, `compute`, `int8`, `fp8`, `fp8_compute`, `mxfp8`, `w4a8` | weight storage and GEMMs ([Quantization](#quantization)); `auto` is what the weights store ([ComfyUI files](#comfyui-files)), `w4a8` a ComfyUI W4A8 file only |
+| `w4a8` | `auto`, `int8`, `packed` | a W4A8 file's decode ([ComfyUI files](#comfyui-files)) |
 | `quant_group` | `0` (per output channel), or any multiple of 16 (e.g. `64`, `128`) | weight-only scale groups of input columns; `int8` / `fp8` only |
 | `fp8_recipe` | `row`, `tensor`, `block` | `fp8_compute` scaling |
 | `stored` | `""`, a file | a pre-quantized text encoder ([below](#pre-quantized-text-encoder)) |
 | `dtype` | `auto` (bf16, or fp16 where the device has no bf16), `bf16`, `fp16` | compute dtype |
 | `stream_resident` | `2` | ring slots per layer kind under `ring` |
-| `pinned` | `True`, `False` | pinned host buffers for offload / ring |
+| `pinned` | `True`, `False` | pinned host copies for offload / ring |
+| `host` | `auto`, `copy`, `file` | the host form of what offload / ring keep on the host: copies in the compute dtype, or the checkpoint's file pages; `auto` copies when they fit the host's room ([offload.md](offload.md#host-room)) |
 | `batch` | `32` | prompts per kernel call |
 | `max_tokens` | `16384` | tokens per kernel call |
 | `layout` | `packed`, `padded`, `single` | [Forward and layouts](#forward-and-layouts) |
@@ -36,6 +38,42 @@ One knob set (`kohakumoss.types.plans.TextEncoderPlan`) serves:
 
 In training the encoder runs on the host only for the offline cache pass: `memory
 ="cpu"` (or `TEXT_DEVICE="cpu"`) with `TEXT_CACHE` online / off is a knob error.
+
+## Streamed load
+
+`QwenTextEncoder.from_pretrained` (`kohakumoss.encoders.text.load`) never holds a dense
+copy of the model in host memory:
+
+1. The text model is built from its config with its parameters on the meta device
+   (`accelerate.init_empty_weights`; the rotary buffers are built on the host). The
+   checkpoint's tensors are read by the text model's names as views of the
+   memory-mapped safetensors (`encoders/text/files.py`: a model dir's shards, a
+   ComfyUI file, a `stored` file); nothing is copied until a tensor moves.
+2. Stored-quantized layers (ComfyUI, `stored`) attach their bases over the file pages.
+3. The W4A8 decode and `memory="auto"` are settled before any weight is read, on the
+   meta model's sizes plus the bytes the load adds: the int8 decode, and quantization
+   at load, measured by quantizing one meta-device linear of each shape.
+4. Module by module (each decoder layer, then the rest) every tensor goes to its home:
+   the compute device under `resident` (and a ring's final norm), else it stays the
+   file page, its compute dtype recorded when the file stores another (an fp16 encoder
+   from the bf16 checkpoint) and applied by the copy that moves it. A module with
+   linears to quantize goes through the work device in the compute dtype, is quantized
+   there (each dense linear freed as it is replaced) and moves to its home quantized; a
+   dequantized ComfyUI layer is dequantized on the host one layer at a time.
+5. The host form (`host`) is settled from the bytes a copy would add; under `cpu` a
+   tensor already in the compute dtype runs from its file page.
+
+The embeddings equal those of a load that reads the whole model to the host first:
+every value is the same cast of the same stored tensor.
+
+Peak private host memory (anon + shmem of the process) of load + encode + release,
+Qwen3.5-9B fp16 from the bf16 checkpoint, RTX 2080 Ti:
+
+| plan | whole model to the host first | streamed |
+| --- | --- | --- |
+| `resident` | 16.4 GiB | 2.7 GiB |
+| `ring` | 19.2 GiB | 1.1 GiB (`host` file) |
+| `offload` | 19.2 GiB | 1.1 GiB (`host` file) |
 
 ## Forward and layouts
 
@@ -121,6 +159,12 @@ Under `ring` / `offload` one pass moves the weights once for `ahead` batches.
 Linears with fewer than 256 input or output features stay dense, as do fp8-compute
 linears whose sizes are not multiples of 128.
 
+Each linear is quantized from the text-encoder checkpoint's stored values (its
+safetensors tensor, by its weight name), not from the plan-dtype copy the layer loaded
+to the work device ([quant-kernels.md](quant-kernels.md#source)): the codes are those of
+the bf16 checkpoint whatever the dtype, so an fp16 encoder (sm75) quantizes like a bf16
+one. The quantization report counts these layers in `from_source`.
+
 Qwen3.5-9B on an RTX 5090 (`scripts/probe/fp8_inference.py`, 5 short prompts),
 embeddings against the host fp64 encode:
 
@@ -141,9 +185,10 @@ in bf16.
 `fp8` weight-only per channel, `fp8_compute` with `FP8_RECIPE`, `mxfp8`) to one
 safetensors file:
 
-- `<n>.weight` holds the codes, `<n>.weight_scale` the recipe's scale, `<n>.bias` the
-  bias;
-- every other tensor is in `SAVE_DTYPE`;
+- `<n>.weight` holds the codes (quantized from the checkpoint's stored values, so they
+  equal quantize-at-load at any `SAVE_DTYPE` and any compute dtype),
+  `<n>.weight_scale` the recipe's scale, `<n>.bias` the bias;
+- every other tensor is in `SAVE_DTYPE` (`bf16` keeps the checkpoint's values);
 - the metadata key `kohakumoss_text_quant` records the precision, recipe and layer list
   (`kohakumoss/quant/stored_text.py`).
 
@@ -154,10 +199,39 @@ TEXT_ENCODE = {"precision": "fp8_compute", "stored": "<file>"}
 ```
 
 - The encoder is built from the text-encoder dir's config without initialising or
-  reading the dense weights. The stored bases are attached as `QuantLinear`, and the
-  remaining tensors load from the file, so nothing is quantized at load.
-- The file's precision must equal the plan's, and `quant_group` must be 0.
+  reading the dense weights. The stored bases are attached as `QuantLinear` over the
+  file pages, and the remaining tensors stream from the file, so nothing is quantized
+  at load.
+- The file's precision must equal the plan's (or the plan's be `auto`), and
+  `quant_group` must be 0.
 - The tokenizer and config still come from the weights root.
+
+### ComfyUI files
+
+A ComfyUI text-encoder file (`text_encoders/qwen3.5_9b_*`, [weights.md](../guides/weights.md#text-encoder))
+streams through `comfy_checkpoint` ([Streamed load](#streamed-load)): the text model is
+built from the packaged config without initialising its weights, `model.language_model.*`
+streams onto it, the tokenizer is the packaged one.
+
+- `precision="auto"` resolves to the file's format, read from its headers and quant
+  records (`text_file_format`): `compute` for the bf16 file, `int8` (int8 ConvRot
+  linears) or `w4a8`. Its quantized linears attach as `QuantLinear` over the stored
+  base, its int8 embedding as `QuantEmbedding`; nothing is quantized at load. On the
+  host (memory `cpu`) `auto` is `compute`.
+- Any other precision dequantizes the stored layers into the dense model (one INFO
+  line) and quantizes from there. Away from `resident` the dequantized layers are host
+  memory of their own (a WARNING when they do not fit the host's room).
+- `w4a8` on a W4A8 file: `int8` decodes every layer once at load (on the compute device,
+  the result at the layer's home), `packed` keeps the 4-bit codes and decodes per call
+  (the compiled decode on CUDA / XPU), `auto` (`default_w4a8`) takes `int8` when the
+  decoded encoder fits resident next to the step's reserve on the device and `packed`
+  otherwise; then `memory="auto"` chooses the placement on the chosen form's sizes.
+- `encoder_spec` (the text cache key) appends the stored layout, e.g.
+  `bf16/int8/g0/src:int8-convrot256`; the offline cache factory computes the same spec
+  from the headers.
+- The kernel prewarm's weightless twin mirrors the loaded quantized modules (their
+  shapes, formats and rotations), so it records the rotated int8 calls a live encode
+  makes.
 
 ## Reporting
 

@@ -17,8 +17,8 @@ The quickest start is a starter config written for your GPU and dataset
 ## Starter configs from flags
 
 ```bash
-kohakumoss-config new train --weights path/to/MOSS-Image-Base --data path/to/dataset
-kohakumoss-config new sample --weights path/to/MOSS-Image-Base --adapter runs/moss/my-lora/export/my-lora-comfy.safetensors
+kohakumoss-config new train --weights ComfyUI/models --data path/to/dataset
+kohakumoss-config new sample --weights ComfyUI/models --adapter runs/moss/my-lora/export/my-lora-comfy.safetensors
 kohakumoss-config list
 kohakumoss-config check configs/user/my-lora.py
 ```
@@ -84,7 +84,8 @@ composition order:
 
 | group | layers | sets |
 | --- | --- | --- |
-| `_base` | `base_lora` (`base_full` = base_lora + algo_full) | weights / data placeholders, objective, schedule, caches, sampling |
+| `_base` | `base_lora` (`base_full` = base_lora + algo_full) | weights (a ComfyUI models folder) / data placeholders, objective, schedule, caches, sampling, exports (SAVE_FORMAT `both`) |
+| `weights` | `comfy`, `hf` | WEIGHTS and the component files: every ComfyUI file named, or the HF pipeline folder ([weights.md](weights.md)) |
 | `algo` | `lora`, `loha`, `lokr`, `oft`, `dora`, `full` | ALGO, DIM, ALPHA, ALGO_KWARGS, DROPOUT, LR; `full`: optimiser, EMA, exports, `ckpt-resident` |
 | `data` | `kohya`, `folder`, `folder_nl`, `jsonl`, `parquet`, `webdataset`, `moss_shard` | the DATASETS entry template with every source argument, CAPTION, ASPECT_RANGE |
 | `vram` | `6g`, `8g`, `12g`, `16g`, `24g`, `auto`, `24g_full` | MEMORY_PROFILE, MAX_TOKENS, TEXT_ENCODE, VAE_ENCODE; `6g`: the offline caches; `6g` / `8g`: SAVE_MINUTES 30; `24g_full`: AdamW, EMA off |
@@ -166,7 +167,7 @@ int8 / fp8 base halves the DiT parts):
 | --- | --- | --- |
 | trainer process and its `NUM_WORKERS` loader workers (spawned processes on Windows, each importing torch) | always | the bench matrix budgets 8 per run (`kohakumoss_bench/plan/hostmem.py`) |
 | the DiT, loaded on the host before placement | build | 9.47 |
-| the text encoder, read into host RAM | build, when `SAMPLE_EVERY > 0` or `TEXT_CACHE` is not `offline`; with an offline text cache it is freed after the sample prompts | 15.63 |
+| the text encoder, streamed from its file pages to its placement ([streamed load](../internals/text-encoder.md#streamed-load)) | when `SAMPLE_EVERY > 0` or `TEXT_CACHE` is not `offline`; with an offline text cache it is freed after the sample prompts | private only for what `ring` / `offload` copy to the host (`host` copy: 15.63 in bf16 / fp16, rounded up per tensor when pinned; `host` file: none, the file pages are page cache) and for layers quantized at load held on the host |
 | streamed DiT blocks, pinned (0.21 per block of 42; the device keeps `stream_resident`) | streaming profiles | about 5.5 (`balanced`) to 8.4 (two resident blocks) |
 | offloaded activations (block inputs, one per block, in pinned buffers rounded up to a power of two) | `act_offload` | about 1 at 4352 tokens, 2 at 8192 |
 | adapter master, moments and gradient sums (16 bytes per trainable parameter) | `optim_state` `stream` / `cpu`, `grad_offload` | about 1.1 for LoRA DIM 32 on `attn-mlp` (74 M parameters) |
@@ -179,7 +180,7 @@ Totals per layer:
 | `24g` (`balanced`) | near 29 GiB | about 14 GiB |
 
 With `SAMPLE_EVERY = 0` and both caches offline only the caches are read and the text
-encoder stays on disk, which removes the 15.63 GiB build peak. Full finetune:
+encoder stays on disk. Full finetune:
 [full-finetune.md](full-finetune.md#host-ram).
 
 ### Multi-GPU layers
@@ -219,7 +220,8 @@ The sample knobs carry the train script's names and values (`PRECISION`,
   that fits next to the DiT ([sampling-memory.md](../internals/sampling-memory.md)).
 
 The base weights are 9.47 GiB (transformer, bf16), 15.63 GiB (text encoder, bf16) and
-0.23 GiB (VAE).
+0.23 GiB (VAE); the ComfyUI int8 files are 5.04 GiB (DiT file) and 9.08 GiB (text-encoder
+file, of which the vision tower, MTP and LM head are not loaded).
 
 ## Recipes
 
@@ -292,3 +294,32 @@ checks each one through that script's knob checks:
 
 A layer is checked on top of its script's base (`base_lora` / `base_sample`), or on the
 base it names in a private `_BASE = "<path>"` (kogine ignores names starting with `_`).
+
+## Knob types
+
+kogine coerces a `--set` value against the default (or annotation) of a knob the script
+binds. The data scripts and the loader bench also take every knob of their owner
+scripts, `scripts/train/moss.py` and the data scripts' folder
+(`check_script(globals(), owners=...)` in `kohakumoss_common.knobs`): a string value of
+such a knob is coerced the same way against the first owner that binds it, so
+`kogine run scripts/data/cache_text.py --set TARGET_AREA=262144` gives the int 262144,
+as it does for the train script. An owner is read only when a string value of one of
+its knobs arrives, once per check, from its source
+(`kohakumoss_common.script_schema.static_schema`): the defaults and annotations built
+from literals, arithmetic, builtin types and earlier such knobs, which is a parse of the
+file and imports nothing. A knob whose default or annotation needs anything else
+(`SAMPLE_PROMPTS`, annotated with kogine's `FormatArg`), or an owner whose module-level
+code runs more than imports, definitions, plain assignments and the `__main__` guard,
+is read with `kohakuengine.introspect_schema` instead: that imports the owner module
+(its `main()` does not run; `scripts/train/moss.py` imports the trainer) and puts its
+folder on `sys.path`. `tests/scripts/test_knob_coercion.py` checks that the two reads
+agree on every owner knob. A coercion that fails keeps the string, with kogine's
+warning; a string knob that no owner binds with a default or an annotation is a knob
+error.
+
+Values from a config file keep their Python type. `kohakumoss_data.type_problems`
+checks every data knob against its `DataConfig` annotation
+(`kohakumoss_common.typecheck`): int, float (an int is a float), bool, str, tuples and
+lists (item by item), dicts, Optional and unions. `data_problems` reports a wrong type
+on its own, and the data scripts exit on one before the dataset is built, e.g.
+`TARGET_AREA='262144' is not int`.

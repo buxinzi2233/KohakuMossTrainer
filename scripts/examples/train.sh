@@ -21,7 +21,7 @@ options (defaults in brackets; see train.ps1 for each one's meaning):
   --fix-file   --fix-checkpoint FILE    --source kohya|folder [kohya]
   --algo lora|lokr [lora]   --dim N [8]   --factor N [16]   --lr X [0 = algo default]
   --steps N [100]   --precision bf16|fp16 [bf16]
-  --base-precision compute|int8|fp8|fp8_compute|mxfp8 [compute]
+  --base-precision auto|compute|int8|fp8|fp8_compute|mxfp8 [auto]
   --memory PROFILE|auto|manual [auto]
   manual plan: --checkpoint MODE --stream off|ring --stream-resident N --pinned on|off
                --act-offload on|off --optim-state gpu|stream|cpu --grad-offload on|off
@@ -32,7 +32,7 @@ options (defaults in brackets; see train.ps1 for each one's meaning):
   --cache off|online|offline [off]   --cache-dir DIR
   --sample-every N [0]   --sample-prompt TEXT   --save-every N [0]
   --tune table|off [table]   --tune-only   --kernel OP=BACKEND (repeatable)
-  --seed N [0]   --log-every N [10]   --logger console|board|wandb [console]   --project NAME
+  --seed N [0]   --log-every N [10]   --logger console|wandb [console]   --project NAME
   --out DIR [runs/examples/train]   --dry-run
 EOF
 }
@@ -62,7 +62,7 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "$1 not on PATH: activate the
 device=cuda index=0
 weights=${KOHAKUMOSS_WEIGHTS:-} fix_checkpoint="" dataset=${KOHAKUMOSS_DATASET:-}
 source=kohya algo=lora dim=8 factor=16 lr=0 steps=100 precision=bf16 fix_file=0
-base_precision=compute memory=auto
+base_precision=auto memory=auto
 checkpoint="" stream="" stream_resident=0 pinned="" act_offload="" optim_state=""
 grad_offload="" fused_step="" fp8_recipe=row fp8_dgrad=16bit
 target_area=1048576 max_tokens=8192 text_memory=auto cache=off cache_dir=""
@@ -89,7 +89,7 @@ while [ $# -gt 0 ]; do
     --steps) steps=$2; shift ;;
     --precision) choice precision "$2" bf16 fp16; precision=$2; shift ;;
     --fix-file) fix_file=1 ;;
-    --base-precision) choice base-precision "$2" compute int8 fp8 fp8_compute mxfp8; base_precision=$2; shift ;;
+    --base-precision) choice base-precision "$2" auto compute int8 fp8 fp8_compute mxfp8; base_precision=$2; shift ;;
     --memory) memory=$2; shift ;;
     --checkpoint) checkpoint=$2; shift ;;
     --stream) choice stream "$2" off ring; stream=$2; shift ;;
@@ -114,7 +114,7 @@ while [ $# -gt 0 ]; do
     --kernel) kernels+=("$2"); shift ;;
     --seed) seed=$2; shift ;;
     --log-every) log_every=$2; shift ;;
-    --logger) choice logger "$2" console board wandb; logger=$2; shift ;;
+    --logger) choice logger "$2" console wandb; logger=$2; shift ;;
     --project) project=$2; shift ;;
     --out) out=$2; shift ;;
     --dry-run) dry_run=1 ;;
@@ -204,9 +204,8 @@ fi
 if [ "$precision" = fp16 ] && [ "$fix_file" = 1 ]; then
   precision_lines="PRECISION = 'fp16'
 FP16_FIX = 'none'
-WEIGHTS = $(pystr "$fix_checkpoint")
-TEXT_ENCODER = $(pystr "$weights/text_encoder")
-VAE = $(pystr "$weights/vae")"
+WEIGHTS = $(pystr "$weights")
+TRANSFORMER = $(pystr "$fix_checkpoint")"
 else
   precision_lines="use_config($(pystr "$cfg_root/precision/precision_$precision.py"))
 WEIGHTS = $(pystr "$weights")"

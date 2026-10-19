@@ -10,8 +10,8 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from kohakumoss_common.log import get_logger
-from kohakumoss_kernels import cache_tag
-from kohakumoss_kernels.backends.eager import ffn, loss, norm, rope, textenc
+from kohakumoss_kernels import compile_setup
+from kohakumoss_kernels.backends.eager import ffn, hadamard, loss, norm, rope, textenc
 from kohakumoss_kernels.errors import unavailable
 
 log = get_logger(__name__)
@@ -46,6 +46,7 @@ EAGER: dict[str, Callable] = {
     "linear_qk_rope": _linear_qk_rope,
     "causal_conv_varlen": textenc.causal_conv_varlen,
     "rms_norm_gated": textenc.rms_norm_gated,
+    "group_hadamard": hadamard.group_hadamard,
 }
 COMPILED = tuple(EAGER)
 
@@ -201,8 +202,8 @@ class CompiledOp:
 
     def _compile(self, key: tuple) -> Callable:
         """The compiled callable of call pattern `key` (a fresh code object), under
-        this package's compile-cache key tag."""
-        cache_tag.apply()
+        this package's compile settings (`compile_setup`)."""
+        compile_setup.apply()
         _raise_dynamo_limits()
         fresh = _fresh(self.eager, f"pattern{len(self.compiled)}")
         fn = torch.compile(

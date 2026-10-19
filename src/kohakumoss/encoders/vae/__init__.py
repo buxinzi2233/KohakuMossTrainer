@@ -13,7 +13,10 @@ from diffusers import AutoencoderKLFlux2
 from torch import Tensor, nn
 
 from kohakumoss.encoders.specs import SpecEncoder, vae_spec
+from kohakumoss.encoders.vae.comfy import load_vae_file
 from kohakumoss.offload.encoders.vae import place_vae
+from kohakumoss.weights import VAE, comfy_file, is_comfy_folder
+from kohakumoss_kernels import compile_setup
 from kohakumoss_kernels.dtypes import BY_NAME
 from kohakumoss_kernels.hardware.arch import arch_of
 
@@ -92,8 +95,8 @@ def vae_encoder(
     rule), carrying the VAE's `encoder_spec`."""
     if not str(path):
         raise ValueError(
-            "vae_encoder: path is empty; set IMAGE_ENCODER_KWARGS['path'] to the VAE dir "
-            "or a pipeline root"
+            "vae_encoder: path is empty; set IMAGE_ENCODER_KWARGS['path'] to the VAE dir, "
+            "a VAE file or a pipeline root"
         )
     resolved = resolve_vae_dtype(dtype, device)
     spec = {"memory": "auto", "batch": batch, **(plan or {})}
@@ -142,6 +145,7 @@ class FluxVae(nn.Module):
             self.vae.to(memory_format=torch.channels_last)
             self._layout = _channels_last
         if compile:
+            compile_setup.apply()
             self._encode = torch.compile(self.vae.encode, dynamic=True)
             self._decode = torch.compile(self.vae.decode, dynamic=True)
 
@@ -153,13 +157,20 @@ class FluxVae(nn.Module):
         dtype: torch.dtype = torch.float32,
         mode: str = "mode",
     ) -> "FluxVae":
-        """`path` is the VAE dir or a pipeline root containing `vae/`. Loaded in fp32
-        (the normalisation statistics stay fp32), then the VAE is cast to `dtype`."""
+        """`path` is the VAE dir, a pipeline root containing `vae/`, one safetensors
+        file (diffusers or BFL keys, e.g. ComfyUI's `flux2-vae_small` / `flux2-vae`) or
+        a ComfyUI models folder (its default VAE file). Loaded in fp32 (the
+        normalisation statistics stay fp32), then the VAE is cast to `dtype`."""
         path = Path(path)
-        sub = "vae" if (path / "vae" / "config.json").is_file() else None
-        vae = AutoencoderKLFlux2.from_pretrained(
-            str(path), subfolder=sub, torch_dtype=torch.float32
-        )
+        if is_comfy_folder(path):
+            path = comfy_file(path, VAE)
+        if path.is_file():
+            vae = load_vae_file(path)
+        else:
+            sub = "vae" if (path / "vae" / "config.json").is_file() else None
+            vae = AutoencoderKLFlux2.from_pretrained(
+                str(path), subfolder=sub, torch_dtype=torch.float32
+            )
         out = cls(vae, mode)
         out.vae.to(dtype)
         return out.to(device)

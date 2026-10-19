@@ -3,6 +3,7 @@ to a `Bound` op that falls back along the arch's backend priority. See
 docs/internals/kernel-dev.md#registry.
 """
 
+import gc
 import importlib
 import threading
 import weakref
@@ -12,7 +13,7 @@ from dataclasses import dataclass, field
 import torch
 
 from kohakumoss_common.log import debug_once, get_logger, info_once, warning_once
-from kohakumoss_kernels import cache_tag, status
+from kohakumoss_kernels import compile_setup, status
 from kohakumoss_kernels.dtypes import short
 from kohakumoss_kernels.errors import (
     LAUNCH_ERRORS,
@@ -93,6 +94,8 @@ recorded_failures = status.recorded_failures
 
 
 _LIVE: "weakref.WeakSet[Bound]" = weakref.WeakSet()
+# ops whose guarded backward succeeded, unguarded at the next `settle_guards`
+PROVEN: "weakref.WeakSet[Bound]" = weakref.WeakSet()
 
 
 class Bound:
@@ -124,16 +127,17 @@ class Bound:
         self.rebind()
 
     def rebind(self) -> None:
-        """Bind the call path for the current recording state and `guard`."""
+        """Bind the call path (a class function) for the current recording state and
+        `guard`."""
         if RECORDS:
-            self._call = self._record
+            self._call = Bound._record
         elif self._guard:
-            self._call = self._guarded
+            self._call = Bound._guarded
         else:
-            self._call = self._plain
+            self._call = Bound._plain
 
     def __call__(self, *args, **kwargs):
-        return self._call(*args, **kwargs)
+        return self._call(self, *args, **kwargs)
 
     def _plain(self, *args, **kwargs):
         try:
@@ -276,7 +280,10 @@ def _backprop(outs, leaves, grads) -> tuple:
 class _Guarded(torch.autograd.Function):
     """Runs a `Bound` op's implementation on detached leaves and its backward through
     autograd.grad; a backend failure in that backward falls the op back and recomputes
-    forward + backward with the next backend from the saved inputs (version-checked)."""
+    forward + backward with the next backend from the saved inputs (version-checked).
+    The backward releases the forward's leaves, outputs and arguments, so the graph
+    keeps none of them after it; a good backward marks the op proven (`settle_guards`
+    then binds its plain path)."""
 
     @staticmethod
     def forward(ctx, op, kwargs, *args):
@@ -296,25 +303,43 @@ class _Guarded(torch.autograd.Function):
         op = ctx.op
         try:
             got = _backprop(ctx.outs, ctx.leaves, grads)
-            op.guard = False
+            PROVEN.add(op)
         except CAUGHT as err:
             saved = iter(ctx.saved_tensors)
             args = [next(saved) if s is None else s[0] for s in ctx.slots]
             op.fall_back(err, args, ctx.kwargs)
             got = _grads(op.fn, ctx.kwargs, _leaves(args), grads)
+        finally:
+            ctx.op = ctx.kwargs = ctx.leaves = ctx.outs = ctx.slots = None
         return (None, None, *got)
+
+
+def settle_guards() -> int:
+    """Bind the plain call path of every op whose guarded backward succeeded (at a step
+    boundary, so one step runs one call path per op); returns how many."""
+    ops = list(PROVEN)
+    PROVEN.clear()
+    for op in ops:
+        op.guard = False
+    return len(ops)
 
 
 def exercise(op: Bound, run: Callable[[Bound], object]) -> object:
     """`run(op)` (the prewarm: a forward + backward on scratch inputs) as build time
     (`status.build_phase`); a backend failure raised anywhere in it, the backward
-    included, falls `op` back and runs it again."""
+    included, falls `op` back and runs it again; a good backward unguards `op` there
+    (no step is running)."""
     with status.build_phase():
         while True:
             try:
-                return run(op)
+                out = run(op)
             except CAUGHT as err:
                 op.fall_back(err)
+                continue
+            if op in PROVEN:
+                PROVEN.discard(op)
+                op.guard = False
+            return out
 
 
 def register(
@@ -405,9 +430,11 @@ def resolve(
 
 
 def load_backends() -> None:
-    """Once per process, on the first kernel build: set the compile-cache key tag and
-    import every backend package (each sets up the host toolchain); a failed import
-    marks that backend unavailable. See docs/internals/kernel-dev.md#lazy-backends."""
+    """Once per process, on the first kernel build: apply the compile settings
+    (`compile_setup`: cache key tag, never-quiesced compile pool) and import every
+    backend package (each sets up the host toolchain); a failed import
+    marks that backend unavailable; then one cyclic gc pass, so no import-time cycle
+    holds the caller's frames. See docs/internals/kernel-dev.md#lazy-backends."""
     if _LOADED:
         return
     with _LOAD_LOCK:
@@ -415,12 +442,13 @@ def load_backends() -> None:
             return
         _LOADING.append(True)
         try:
-            cache_tag.apply()
+            compile_setup.apply()
             for name in BACKENDS:
                 try:
                     importlib.import_module(f"kohakumoss_kernels.backends.{name}")
                 except ImportError as err:
                     mark_unavailable(name, str(err))
+            gc.collect()
         finally:
             _LOADING.clear()
         _LOADED.append(True)

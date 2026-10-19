@@ -209,7 +209,19 @@ tensor needing grad) runs through `registry._Guarded`:
   modified in place since the forward raises autograd's version error instead of
   recomputing on the new values;
 - checkpointed and offloaded calls (saved-tensor hooks) keep their own graph semantics
-  and are not guarded.
+  and are not guarded;
+- the backward releases the forward's leaves, outputs and arguments (they are kept
+  as `ctx` attributes, which autograd does not free): a graph that outlives its
+  backward (a driver holding the step's loss into the next step) keeps none of them.
+  Without the release, an uncheckpointed step 1 keeps its whole activation set into
+  step 2's forward;
+- a good backward marks the op proven, and `registry.settle_guards()` at the step
+  boundary (`finish_step`, `MemorySession.step`) binds its plain path, so one step
+  (every micro-batch of it) runs one call path per op. Outside a step
+  (`registry.exercise`, the prewarm) a good backward unguards the op at once.
+
+The drivers also return each step's `StepOut` detached (`StepOut.detached()`), so no
+step's graph is held past its backward whatever else keeps `ctx` attributes.
 
 **Call paths.** A `Bound` binds its call path once per state instead of testing it per
 call:
@@ -220,8 +232,8 @@ call:
 | `guard` on | the guarded path (the per-call `_records_grad` test) |
 | otherwise | the implementation directly inside the fallback's `try` |
 
-Setting `guard` (the first good backward, a fallback) and entering or leaving a
-recording (`recording.on_change`) rebind every live `Bound`.
+Setting `guard` (`settle_guards` after a good backward, a fallback) and entering or
+leaving a recording (`recording.on_change`) rebind every live `Bound`.
 
 ### What counts as a failure
 
@@ -260,16 +272,24 @@ builds a kernel pays none of it. The first kernel build (`registry.resolve` or
 `available`, i.e. the first `OpSet.resolve` of a model) runs `registry.load_backends()`
 once per process:
 
-1. it appends the compile-cache key tag (`cache_tag.apply()`,
-   [Compile cache key](#compile-cache-key));
+1. it applies the process's compile settings (`compile_setup.apply()`: the
+   compile-cache key tag, [Compile cache key](#compile-cache-key), and the compile
+   worker pool, [Compile backend](#compile-backend));
 2. it imports the eager, compile, Triton and TileLang backend packages; the Triton and
    TileLang packages set up the host toolchain on import (`ensure_toolchain()`:
    `vcvars64` and `PATH` / `CXX` on Windows, the Intel Triton UTF-8 sources), the
-   compile backend at its first CPU probe.
+   compile backend at its first CPU probe;
+3. it runs one cyclic gc pass. The compile backend imports `torch._dynamo`, and that
+   import leaves a reference cycle through the importing stack (`torch.fx.wrap` keeps
+   its own frame, whose `f_back` chain reaches every caller frame): without the pass,
+   the frame of the call that built the first kernels, `load_backbone` with the model
+   among its locals, outlives it until the collector runs. See
+   [reference-cycles.md](reference-cycles.md).
 
-`CompiledOp` also applies the key tag before its first compile.
-`tests/kernels/registry/test_lazy_backends.py` checks it in a fresh process (negative:
-backends loaded at import).
+`CompiledOp` also applies the settings before its first compile.
+`tests/kernels/registry/test_lazy_backends.py` checks it in a fresh process (negatives:
+backends loaded at import; the gc pass left out, which keeps an object held by the
+first build's caller alive with automatic gc off).
 
 ## Current device
 
@@ -329,6 +349,24 @@ the pattern), so a bound call computes one key and calls the runner, not the pat
 well. The adapter compile candidate (`adapters/bind/autotuned.py`, `CompiledBody`) binds
 the `CompiledOp` of an autotuned op's operand shapes once per bucket
 (`CompiledBody.at`).
+
+**Compile worker pool.** On Linux inductor compiles Triton kernels in a sidecar
+process with a pool of forked workers (`min(32, cpu count)`); on Windows it compiles
+in-process. Inductor's default quiesces that pool 60 s after its last compile result
+and forks a new one on the next compile, from a sidecar whose previous pool's threads
+are still winding down; a worker forked then can deadlock on an inherited lock, and the
+job it took never returns (`future.result()` has no timeout: the process waits
+forever). `compile_setup.apply()` sets `TORCHINDUCTOR_QUIESCE_ASYNC_COMPILE_POOL=0`
+(an environment value already set wins), and puts the value inductor's config reads
+from it in place when that config is already loaded (a plain config assignment holds
+for one thread only), so the pool is created without its idle Timer and lives for the
+process. Every torch.compile site in `src/` calls it first
+(`tests/rules/test_compile_sites.py`), the run line and sample.py log it
+(`compile pool: no quiesce`), and `tests/kernels/registry/test_compile_pool.py` checks
+the pool in a fresh process (negative: inductor's default pool has the Timer). Cost:
+the workers stay up for the process; during an integration training run the 32
+workers held 0.85 GiB proportional (PSS) host memory, 12.6 GB RSS counting the pages they share with the
+sidecar, and the sidecar 0.46 GiB, which it holds either way. No device memory.
 
 ## Fused linear ops
 

@@ -12,11 +12,13 @@ from kohakumoss.quant.compute import COMPUTE as FP8_COMPUTE
 from kohakumoss.quant.compute import DGRAD as FP8_DGRAD
 from kohakumoss.quant.compute import FP8_RECIPES
 from kohakumoss.types.plans import MemoryPlan
+from kohakumoss_common.typecheck import describe, mismatches
 from kohakumoss_kernels.hardware.arch import arch_of
 
 CHECKPOINT_MODES = ("none", "block", "sub-block", "selective")
 STREAM_MODES = ("off", "ring", "swap")
-BASE_PRECISIONS = ("compute", "fp8", "int8", "quant", *FP8_COMPUTE)
+BASE_PRECISIONS = ("auto", "compute", "fp8", "int8", "quant", *FP8_COMPUTE)
+QUANTIZED_BASES = ("fp8", "int8", "quant")
 KNOB_FIELDS = {"compile": "COMPILE", "kernels": "KERNELS"}
 OPTIM_STATES = ("gpu", "stream", "cpu")
 COMPILE_MODES = ("off", "block", "model")
@@ -25,7 +27,7 @@ PROFILES: dict[str, dict] = {
     "speed": dict(
         checkpoint="none",
         act_offload=False,
-        base_precision="compute",
+        base_precision="auto",
         stream="off",
         optim_state="gpu",
         fused_step=False,
@@ -33,7 +35,7 @@ PROFILES: dict[str, dict] = {
     "balanced": dict(
         checkpoint="block",
         act_offload=False,
-        base_precision="compute",
+        base_precision="auto",
         stream="ring",
         stream_resident=16,
         optim_state="gpu",
@@ -42,7 +44,7 @@ PROFILES: dict[str, dict] = {
     "low": dict(
         checkpoint="block",
         act_offload=True,
-        base_precision="compute",
+        base_precision="auto",
         stream="ring",
         stream_resident=4,
         optim_state="stream",
@@ -51,7 +53,7 @@ PROFILES: dict[str, dict] = {
     "minimal": dict(
         checkpoint="block",
         act_offload=True,
-        base_precision="compute",
+        base_precision="auto",
         stream="ring",
         stream_resident=2,
         optim_state="stream",
@@ -79,7 +81,8 @@ def _fp8_device_problems(plan: MemoryPlan, device) -> list[str]:
 
 
 def resolve_base_precision(value: str, device: torch.device | str) -> str:
-    """`quant` picks fp8 where the arch has fp8 GEMMs, else int8."""
+    """`quant` picks fp8 where the arch has fp8 GEMMs, else int8; `auto` stays (the
+    checkpoint's stored format, applied by `memory.apply.quantize_base`)."""
     if value != "quant":
         return value
     arch = arch_of(device)
@@ -92,8 +95,14 @@ def validate(
     inference: bool = False,
     device: torch.device | str | None = None,
 ) -> list[str]:
-    """Every problem with `plan`, as messages (empty = valid)."""
-    problems = []
+    """Every problem with `plan`, as messages (empty = valid); a field of the wrong type
+    is reported alone, ahead of the checks that read its value."""
+    problems = [
+        f"{name}={value!r} is not {describe(annotation)}"
+        for name, value, annotation in mismatches(plan)
+    ]
+    if problems:
+        return problems
     if (
         device is not None
         and plan.base_precision in ("fp8", *FP8_COMPUTE)
@@ -128,7 +137,7 @@ def validate(
         problems.append(
             f"base_precision {plan.base_precision!r} not in {BASE_PRECISIONS}"
         )
-    if plan.base_precision in ("fp8", "int8", "quant") and trainable_base:
+    if plan.base_precision in QUANTIZED_BASES and trainable_base:
         problems.append("a quantized base cannot be trained (full FT)")
     if plan.base_precision in FP8_COMPUTE and trainable_base and plan.stream != "off":
         problems.append(
@@ -171,7 +180,7 @@ def resolve(
     defaults = {k: v for k, v in PROFILES[profile].items() if k in known}
     values = {**defaults, **overrides, "profile": profile}
     if trainable_base and "base_precision" not in overrides:
-        values["base_precision"] = "compute"
+        values["base_precision"] = "auto"
     if trainable_base and "stream" not in overrides and values.get("stream") == "ring":
         values["stream"] = "swap"
     swap = trainable_base and not inference and values.get("stream") == "swap"
@@ -238,7 +247,7 @@ def catalog() -> dict[str, dict]:
     out: dict[str, dict] = {}
     for combo in product(*(axis.items() for axis in CATALOG_AXES)):
         name = "-".join(part for part, _ in combo if part)
-        values = dict(base_precision="compute", pinned=True)
+        values = dict(base_precision="auto", pinned=True)
         for _, knobs in combo:
             values.update(knobs)
         if not validate(replace(MemoryPlan(), **values)):

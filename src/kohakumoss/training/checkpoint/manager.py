@@ -39,12 +39,15 @@ def _barrier() -> None:
 class CheckpointManager:
     """Owns `<output>/checkpoints/step_XXXXXXXX/` directories; called on every rank.
     `before_save` runs on every rank before each save (e.g. flushing the online cache
-    writer); `devices` are this rank's devices whose CUDA RNG state is kept."""
+    writer), `after_save(step, path)` on every rank after it (path: the checkpoint
+    directory on rank 0, None elsewhere; e.g. the checkpoint exports); `devices` are
+    this rank's devices whose CUDA RNG state is kept."""
 
     def __init__(
         self,
         output_dir: str | Path,
         keep_last: int,
+        final: bool = True,
         snapshot_ema: bool = False,
         is_main: bool = True,
         before_save=nothing,
@@ -54,17 +57,28 @@ class CheckpointManager:
         self.root = Path(output_dir) / "checkpoints"
         self.snap_root = Path(output_dir) / "ema_snapshots"
         self.keep_last = keep_last
-        self.snapshot = self._snapshot if snapshot_ema else nothing
+        self._snap = CheckpointManager._snapshot if snapshot_ema else nothing
         self.before_save = before_save
+        self.after_save = nothing
         self.rank = rank
         self.devices = tuple(devices)
         self.last_saved = -1
-        self._save = self._write if is_main else nothing
+        self._save = CheckpointManager._write if is_main else nothing
         self._clear = self._clear_partial if is_main else nothing
+        self._finish = CheckpointManager._final if final else nothing
 
     def saved(self, step: int) -> bool:
         """Whether this manager already wrote the checkpoint of `step`."""
         return step == self.last_saved
+
+    def finish(self, step: int, parts: dict) -> None:
+        """Every rank, at the run's end: the final checkpoint when `final` is on and
+        `step` is not saved yet; nothing otherwise."""
+        self._finish(self, step, parts)
+
+    def _final(self, step: int, parts: dict) -> None:
+        if not self.saved(step):
+            self.save(step, parts)
 
     def save(self, step: int, parts: dict) -> Path | None:
         """Every rank: its RNG file (and its optimiser shard, `parts["optim_rank"]`);
@@ -77,9 +91,10 @@ class CheckpointManager:
         if "optim_rank" in parts:
             save_optim_rank(partial, self.rank, parts["optim_rank"])
         _barrier()
-        path = self._save(step, parts)
+        path = self._save(self, step, parts)
         _barrier()
         self.last_saved = step
+        self.after_save(step, path)
         return path
 
     def _write(self, step: int, parts: dict) -> Path:
@@ -97,7 +112,7 @@ class CheckpointManager:
         if final.exists():
             shutil.rmtree(final)
         partial.rename(final)
-        self.snapshot(step, parts["ema"], parts.get("ema_gammas", {}))
+        self._snap(self, step, parts["ema"], parts.get("ema_gammas", {}))
         self.prune()
         return final
 

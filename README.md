@@ -89,11 +89,12 @@ Intel Arc、Google Colab、extra 以及 Triton / TileLang 工具链：
 # 1. check the environment
 kohakumoss-doctor
 
-# 2. weights (~26 GB)
-hf download OpenMOSS-Team/MOSS-Image-Base --local-dir models/MOSS-Image-Base
+# 2. weights into a ComfyUI models folder (~15 GB: the int8 DiT and text encoder, the VAE)
+hf download Comfy-Org/MOSS-Image diffusion_models/moss_image_base_int8_convrot.safetensors \
+    text_encoders/qwen3.5_9b_int8_convrot.safetensors vae/flux2-vae_small.safetensors --local-dir ComfyUI/models
 
 # 3. a config for this GPU and your dataset (kohya-style folders; --source for others)
-kohakumoss-config new train --weights models/MOSS-Image-Base --data path/to/dataset --name my-lora
+kohakumoss-config new train --weights ComfyUI/models --data path/to/dataset --name my-lora
 
 # 4. data: check the plan, then cache text embeddings and latents once
 kogine run scripts/data/inspect_data.py --config configs/user/my-lora_data.py
@@ -104,16 +105,22 @@ kogine run scripts/data/cache_latents.py --config configs/user/my-lora_data.py
 kogine run scripts/train/moss.py --config configs/user/my-lora.py
 
 # 6. sample with the exported adapter
-kohakumoss-config new sample --weights models/MOSS-Image-Base --adapter runs/moss/my-lora/export/my-lora-comfy.safetensors --name my-lora-sample
+kohakumoss-config new sample --weights ComfyUI/models --adapter runs/moss/my-lora/export/my-lora-comfy.safetensors --name my-lora-sample
 kogine run scripts/sample/sample.py --config configs/user/my-lora-sample.py --set PROMPT="a lighthouse on a rocky coast at sunset"
 
-# 7. export any checkpoint again (LyCORIS / ComfyUI / merged / diffusers)
-kogine run scripts/export/export.py --set WEIGHTS=models/MOSS-Image-Base \
+# 7. export any checkpoint again (ComfyUI / LyCORIS / merged / diffusers)
+kogine run scripts/export/export.py --set WEIGHTS=ComfyUI/models \
     --set ADAPTER=runs/moss/my-lora/checkpoints/step_00001000/trainable.safetensors --set OUT=my-lora.safetensors
 ```
 
-运行会写入 `runs/moss/<RUN_NAME>/`：`log.txt`、`metrics.jsonl`、样本、检查点和 `export/`
-（`comfy` 与 `lycoris` 文件）。`kohakumoss-config wizard` 会询问 GPU、算法、数据和权重，
+HF 布局的用法完全相同：`hf download OpenMOSS-Team/MOSS-Image-Base --local-dir models/MOSS-Image-Base`
+（约 26 GB，bf16），并传入 `--weights models/MOSS-Image-Base`；每个文件放在哪里，以及全部
+ComfyUI 文件见 [docs/guides/weights.md](docs/guides/weights.md)。
+
+运行会写入 `runs/moss/<RUN_NAME>/`：`log.txt`、`metrics.jsonl`、样本、检查点（每个检查点都带有
+自己的 `export/`）以及 `export/`（`SAVE_FORMAT`：默认是 ComfyUI LoRA 文件，`hf` 为 LyCORIS
+文件，`both` 表示两者；`SAVE_MERGED` 会额外写入合并后的 DiT）。ComfyUI LoRA 在 Comfy-Org
+文件上用 LoRA loader 节点加载。`kohakumoss-config wizard` 会询问 GPU、算法、数据和权重，
 而不是使用命令行标志；`kohakumoss-config new --from lora_24g_bf16 my_run.py` 会在固定配方
 （`configs/moss/recipes/`）基础上扩展，并列出所有参数。
 
@@ -121,9 +128,9 @@ kogine run scripts/export/export.py --set WEIGHTS=models/MOSS-Image-Base \
 和一个 bash 版本（[scripts/examples/README.md](scripts/examples/README.md)）：
 
 ```powershell
-.\scripts\examples\train.ps1 -Weights models\MOSS-Image-Base -Dataset D:\data\my_set -Steps 30 -SampleEvery 10
-.\scripts\examples\sample.ps1 -Weights models\MOSS-Image-Base -Adapter runs\examples\train\<run>\export\<run>-lycoris.safetensors
-.\scripts\examples\grid.ps1 -Weights models\MOSS-Image-Base -Run <run> -Checkpoints -Prompt "a lighthouse at dusk"
+.\scripts\examples\train.ps1 -Weights ComfyUI\models -Dataset D:\data\my_set -Steps 30 -SampleEvery 10
+.\scripts\examples\sample.ps1 -Weights ComfyUI\models -Adapter runs\examples\train\<run>\export\<run>-comfy.safetensors
+.\scripts\examples\grid.ps1 -Weights ComfyUI\models -Run <run> -Checkpoints -Prompt "a lighthouse at dusk"
 ```
 
 完整走查见 [docs/guides/first-lora.md](docs/zh-CN/guides/first-lora.md)；采样见
