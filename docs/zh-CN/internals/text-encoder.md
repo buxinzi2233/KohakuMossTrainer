@@ -23,13 +23,15 @@ Gated DeltaNet 层、8 个因果 GQA 全注意力层，隐藏维度 4096）。�
 | --- | --- | --- |
 | `memory` | `resident`、`offload`、`ring`（也接受 `stream`，视为同一值）、`cpu`、`auto` | 放置方式（[offload.md](offload.md#text-encoder)）；数据类默认值是 `resident`（`kohakumoss.types.plans`），训练和采样会将未设置的 `memory` 解析为 `auto` |
 | `free_after_use` | `False`、`True` | 首次执行后丢弃模型 |
-| `precision` | `compute`、`int8`、`fp8`、`fp8_compute`、`mxfp8` | 权重存储与 GEMM（[量化](#quantization)） |
+| `precision` | `auto`、`compute`、`int8`、`fp8`、`fp8_compute`、`mxfp8`、`w4a8` | 权重存储与 GEMM（[量化](#quantization)）；`auto` 表示权重所存储的格式（[ComfyUI 文件](#comfyui-files)），`w4a8` 仅用于 ComfyUI W4A8 文件 |
+| `w4a8` | `auto`、`int8`、`packed` | W4A8 文件的解码方式（[ComfyUI 文件](#comfyui-files)） |
 | `quant_group` | `0`（每个输出通道），或任意 16 的倍数（例如 `64`、`128`） | 仅权重量化时输入列的缩放分组；仅用于 `int8` / `fp8` |
 | `fp8_recipe` | `row`、`tensor`、`block` | `fp8_compute` 缩放方式 |
 | `stored` | `""`、文件 | 预量化的文本编码器（[见下文](#pre-quantized-text-encoder)） |
 | `dtype` | `auto`（bf16，设备不支持 bf16 时为 fp16）、`bf16`、`fp16` | 计算 dtype |
 | `stream_resident` | `2` | `ring` 下每种层类型的环形槽位数 |
-| `pinned` | `True`、`False` | 用于卸载 / 环形流式传输的主机锁页缓冲区 |
+| `pinned` | `True`、`False` | 用于卸载 / 环形流式传输的主机锁页副本 |
+| `host` | `auto`、`copy`、`file` | 卸载 / 环形流式传输保留在主机上的内容的形态：计算 dtype 的副本，或检查点的文件页；`auto` 在放得下主机余量时使用副本（[offload.md](offload.md#host-room)） |
 | `batch` | `32` | 每次内核调用的提示词数 |
 | `max_tokens` | `16384` | 每次内核调用的 token 数 |
 | `layout` | `packed`、`padded`、`single` | [前向与布局](#forward-and-layouts) |
@@ -41,6 +43,39 @@ Gated DeltaNet 层、8 个因果 GQA 全注意力层，隐藏维度 4096）。�
 训练时，编码器仅在离线缓存阶段运行于主机：当 `TEXT_CACHE` 为 online / off 时，
 设置 `memory
 ="cpu"`（或 `TEXT_DEVICE="cpu"`）属于控制项错误。
+
+<a id="streamed-load"></a>
+## 流式加载
+
+`QwenTextEncoder.from_pretrained`（`kohakumoss.encoders.text.load`）从不在主机内存中
+持有模型的稠密副本：
+
+1. 文本模型根据其配置构建，参数位于 meta 设备上（`accelerate.init_empty_weights`；
+   旋转缓冲区在主机上构建）。检查点的张量按文本模型的名称读取为内存映射 safetensors
+   的视图（`encoders/text/files.py`：模型目录的分片、ComfyUI 文件、`stored` 文件）；
+   在张量移动之前不做任何复制。
+2. 存储量化的层（ComfyUI、`stored`）在文件页之上附加其基础权重。
+3. W4A8 解码和 `memory="auto"` 在读取任何权重之前就确定，依据是 meta 模型的尺寸加上
+   本次加载新增的字节数：int8 解码，以及加载时的量化（通过对每种形状的一个 meta 设备
+   线性层做量化来测量）。
+4. 逐模块（先是每个解码器层，然后是其余部分）每个张量都去往自己的归属位置：`resident`
+   下去计算设备（以及环形缓冲区的最终归一化层），否则留在文件页，当文件存储的是另一种
+   计算 dtype 时记录该 dtype（从 bf16 检查点得到 fp16 编码器），由移动它的那次复制应用。
+   含待量化线性层的模块会经由工作设备以计算 dtype 处理，在那里量化（每个稠密线性层在
+   被替换时立即释放）并以量化形式移往归属位置；反量化的 ComfyUI 层在主机上逐层反量化。
+5. 主机形态（`host`）根据一次复制会增加的字节数确定；在 `cpu` 下，已经处于计算 dtype 的
+   张量直接从其文件页运行。
+
+嵌入与先把整个模型读入主机再加载的结果相同：每个值都是同一个存储张量的同一种转换。
+
+加载 + 编码 + 释放的私有主机内存峰值（进程的 anon + shmem），Qwen3.5-9B fp16
+来自 bf16 检查点，RTX 2080 Ti：
+
+| 计划 | 先把整个模型读入主机 | 流式加载 |
+| --- | --- | --- |
+| `resident` | 16.4 GiB | 2.7 GiB |
+| `ring` | 19.2 GiB | 1.1 GiB（`host` 为 `file`） |
+| `offload` | 19.2 GiB | 1.1 GiB（`host` 为 `file`） |
 
 <a id="forward-and-layouts"></a>
 ## 前向与布局
@@ -124,6 +159,12 @@ RTX 5090），绝对误差 / 相对误差：
 
 输入或输出特征数少于 256 的线性层保持稠密，尺寸不是 128 倍数的 fp8-compute 线性层也一样。
 
+每个线性层都从文本编码器检查点存储的数值（按其权重名对应的 safetensors 张量）量化，
+而不是从该层加载到工作设备的计划 dtype 副本量化
+（[quant-kernels.md](quant-kernels.md#source)）：无论 dtype 如何，编码值都是 bf16
+检查点的编码值，因此 fp16 编码器（sm75）的量化结果与 bf16 相同。量化报告在
+`from_source` 中统计这些层。
+
 RTX 5090 上的 Qwen3.5-9B（`scripts/probe/fp8_inference.py`，5 条短提示词），
 嵌入对比主机 fp64 编码：
 
@@ -143,8 +184,10 @@ RTX 5090 上的 Qwen3.5-9B（`scripts/probe/fp8_inference.py`，5 条短提示�
 `scripts/export/text_quant.py` 将一种精度的量化线性层（`int8` / `fp8` 按通道仅权重量化、
 使用 `FP8_RECIPE` 的 `fp8_compute`、`mxfp8`）写入一个 safetensors 文件：
 
-- `<n>.weight` 保存编码值，`<n>.weight_scale` 保存配方的缩放值，`<n>.bias` 保存偏置；
-- 其他所有张量均使用 `SAVE_DTYPE`；
+- `<n>.weight` 保存编码值（从检查点存储的数值量化而来，因此在任何 `SAVE_DTYPE` 和任何
+  计算 dtype 下都等于加载时量化），`<n>.weight_scale` 保存配方的缩放值，`<n>.bias`
+  保存偏置；
+- 其他所有张量均使用 `SAVE_DTYPE`（`bf16` 保留检查点的数值）；
 - 元数据键 `kohakumoss_text_quant` 记录精度、配方和层列表（`kohakumoss/quant/stored_text.py`）。
 
 训练和推理都通过计划字段 `stored` 指定文件：
@@ -154,9 +197,32 @@ TEXT_ENCODE = {"precision": "fp8_compute", "stored": "<file>"}
 ```
 
 - 编码器由文本编码器目录的配置构建，不初始化或读取稠密权重。存储的基础权重以
-  `QuantLinear` 附加，其余张量从文件加载，因此加载时不做任何量化。
-- 文件的精度必须与计划一致，且 `quant_group` 必须为 0。
+  `QuantLinear` 附加在文件页之上，其余张量从文件流式加载，因此加载时不做任何量化。
+- 文件的精度必须与计划一致（或计划的精度为 `auto`），且 `quant_group` 必须为 0。
 - 分词器和配置仍来自权重根目录。
+
+<a id="comfyui-files"></a>
+### ComfyUI 文件
+
+ComfyUI 文本编码器文件（`text_encoders/qwen3.5_9b_*`，
+[weights.md](../guides/weights.md#text-encoder)）经由 `comfy_checkpoint` 流式加载
+（[流式加载](#streamed-load)）：文本模型根据打包的配置构建，不初始化其权重，
+`model.language_model.*` 流式加载到其上，分词器使用打包的那个。
+
+- `precision="auto"` 解析为文件的格式，从其头部和量化记录读取（`text_file_format`）：
+  bf16 文件为 `compute`，另有 `int8`（int8 ConvRot 线性层）或 `w4a8`。其量化线性层以
+  `QuantLinear` 附加在存储的基础权重之上，其 int8 嵌入为 `QuantEmbedding`；加载时不做
+  任何量化。在主机上（memory 为 `cpu`）`auto` 即 `compute`。
+- 其他任何精度都会把存储的层反量化进稠密模型（一行 INFO），再从此量化。不在 `resident`
+  时，反量化后的层会单独占用主机内存（放不下主机余量时给出 WARNING）。
+- W4A8 文件上的 `w4a8`：`int8` 在加载时把每一层解码一次（在计算设备上，结果放在该层的
+  归属位置），`packed` 保留 4 位编码值并每次调用时解码（CUDA / XPU 上使用编译解码），
+  `auto`（`default_w4a8`）在解码后的编码器能以常驻方式放在设备上、与每步的预留量并存时
+  选择 `int8`，否则选择 `packed`；随后 `memory="auto"` 按所选形态的尺寸决定放置方式。
+- `encoder_spec`（文本缓存键）会附加存储布局，例如 `bf16/int8/g0/src:int8-convrot256`；
+  离线缓存工厂会从头部计算出相同的 spec。
+- 内核预热的无权重孪生副本会镜像已加载的量化模块（其形状、格式和旋转），因此它记录在线
+  编码实际发生的旋转 int8 调用。
 
 <a id="reporting"></a>
 ## 报告

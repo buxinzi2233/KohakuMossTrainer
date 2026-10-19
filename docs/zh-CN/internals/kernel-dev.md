@@ -128,7 +128,17 @@ XPU 上也注册了 Triton 融合 linear（`linear_situ`、`linear_gated_residua
 
 - 实现在分离的叶张量上运行，并通过 `autograd.grad` 执行反向，因此仅在反向抛出的失败也会触发回退，并在下一个后端重新计算梯度；
 - 重计算从 `save_for_backward` 读取调用的张量输入，因此如果输入在前向之后被原位修改，就会抛出 autograd 的版本错误，而不是使用新值重算；
-- 使用梯度检查点和卸载的调用（saved-tensor hooks）保留自身的计算图语义，不受此保护。
+- 使用梯度检查点和卸载的调用（saved-tensor hooks）保留自身的计算图语义，不受此保护；
+- 反向会释放前向的叶张量、输出和参数（它们作为 `ctx` 属性保留，autograd 不会释放）：
+  比其反向存活更久的计算图（驱动器把该步的 loss 带入下一步）不会保留其中任何一个。
+  若不释放，未启用梯度检查点的第 1 步会把其整套激活保留到第 2 步的前向；
+- 一次成功的反向会把该算子标记为已验证，步边界处（`finish_step`、`MemorySession.step`）
+  的 `registry.settle_guards()` 会绑定其普通路径，因此一步（及其每个微批次）对每个算子只
+  运行一条调用路径。在一步之外（`registry.exercise`、预热），一次成功的反向会立即解除该
+  算子的保护。
+
+驱动器还会以分离形式返回每步的 `StepOut`（`StepOut.detached()`），因此无论还有什么保留着
+`ctx` 属性，任何一步的计算图都不会在其反向之后继续存活。
 
 **调用路径。** `Bound` 按状态绑定一次调用路径，而不是每次调用都测试：
 
@@ -138,7 +148,7 @@ XPU 上也注册了 Triton 融合 linear（`linear_situ`、`linear_gated_residua
 | `guard` 开启 | 受保护路径（逐调用的 `_records_grad` 测试） |
 | 其他情况 | 在回退的 `try` 内直接调用实现 |
 
-设置 `guard`（首次成功反向、发生回退）以及进入或退出记录（`recording.on_change`）时，都会重新绑定每个存活的 `Bound`。
+设置 `guard`（一次成功反向后的 `settle_guards`、发生回退）以及进入或退出记录（`recording.on_change`）时，都会重新绑定每个存活的 `Bound`。
 
 <a id="what-counts-as-a-failure"></a>
 ### 什么算作失败
@@ -165,10 +175,19 @@ XPU 上也注册了 Triton 融合 linear（`linear_situ`、`linear_gated_residua
 
 `import kohakumoss_kernels` 不执行任何后端工作，因此从不构建内核的数据辅助工具或 CLI 不承担这些成本。首次构建内核（`registry.resolve` 或 `available`，即模型的第一次 `OpSet.resolve`）时，每个进程执行一次 `registry.load_backends()`：
 
-1. 追加编译缓存键标签（`cache_tag.apply()`，[编译缓存键](#compile-cache-key)）；
-2. 导入 eager、compile、Triton 和 TileLang 后端包；Triton 和 TileLang 包在导入时设置主机工具链（`ensure_toolchain()`：Windows 上的 `vcvars64` 和 `PATH` / `CXX`、Intel Triton UTF-8 源码），compile 后端则在首次 CPU 探测时设置。
+1. 应用进程的编译设置（`compile_setup.apply()`：编译缓存键标签，[编译缓存键](#compile-cache-key)，
+   以及编译工作进程池，[Compile 后端](#compile-backend)）；
+2. 导入 eager、compile、Triton 和 TileLang 后端包；Triton 和 TileLang 包在导入时设置主机
+   工具链（`ensure_toolchain()`：Windows 上的 `vcvars64` 和 `PATH` / `CXX`、Intel Triton
+   UTF-8 源码），compile 后端则在首次 CPU 探测时设置；
+3. 运行一次循环 gc。compile 后端会导入 `torch._dynamo`，而该导入会经由导入栈留下一个引用环
+   （`torch.fx.wrap` 保留自己的栈帧，其 `f_back` 链可达每个调用者栈帧）：若不运行这一遍，
+   构建首批内核的那次调用（`load_backbone`，其局部变量中有模型）的栈帧会一直存活到回收器
+   运行。见 [reference-cycles.md](reference-cycles.md)。
 
-`CompiledOp` 也会在首次编译前应用键标签。`tests/kernels/registry/test_lazy_backends.py` 在新进程中检查这一点（反例：导入时加载后端）。
+`CompiledOp` 也会在首次编译前应用这些设置。
+`tests/kernels/registry/test_lazy_backends.py` 在新进程中检查这一点（反例：导入时加载后端；
+省略 gc 这一遍，在关闭自动 gc 时会让首次构建的调用者所持有的对象继续存活）。
 
 <a id="current-device"></a>
 ## 当前设备
@@ -204,6 +223,22 @@ XPU 上也注册了 Triton 融合 linear（`linear_situ`、`linear_gated_residua
 - 在外层 torch.compile 内部会追踪 eager 参考实现。
 
 **绑定。** `CompiledOp.resolved(args)` 是 `args` 对应模式的运行器。内核与编译路径比较算子按调用键（设备、梯度模式、线程数和 autocast dtype，以及每个参数的形状 / dtype / 梯度标志或值，这些内容包含该模式）绑定它，因此绑定后的调用只计算一个键并调用运行器，无需再计算模式。适配器 compile 候选（`adapters/bind/autotuned.py`、`CompiledBody`）按桶将自动调优算子的操作数形状所对应的 `CompiledOp` 绑定一次（`CompiledBody.at`）。
+
+**编译工作进程池。** 在 Linux 上，inductor 会在边车进程中用一组 fork 出的工作进程
+（`min(32, cpu count)`）编译 Triton 内核；在 Windows 上则在进程内编译。inductor 的
+默认行为是在最后一次编译结果出现 60 s 后让该进程池静默，并在下一次编译时重新 fork 一个，
+而此时的边车进程中上一个进程池的线程仍在退出；此时 fork 出的工作进程可能在继承的锁上
+死锁，它接下的任务永远不会返回（`future.result()` 没有超时：进程会永久等待）。
+`compile_setup.apply()` 会设置 `TORCHINDUCTOR_QUIESCE_ASYNC_COMPILE_POOL=0`
+（已设置的环境变量优先），并在 inductor 的配置已加载时把该配置从此变量读取的值写入其中
+（普通配置赋值只对一个线程有效），因此进程池创建时不带其空闲 Timer，并存活于整个进程。
+`src/` 中每个 torch.compile 位置都会先调用它（`tests/rules/test_compile_sites.py`），
+运行命令行和 sample.py 会记录它（`compile pool: no quiesce`），
+`tests/kernels/registry/test_compile_pool.py` 会在新进程中检查该进程池
+（反例：inductor 的默认进程池带有 Timer）。开销：工作进程在进程存续期间一直运行；
+在一次集成训练运行中，32 个工作进程占用 0.85 GiB 比例（PSS）主机内存，
+计入与边车共享的页则为 12.6 GB RSS，边车占用 0.46 GiB（无论如何都会占用）。
+不占设备内存。
 
 <a id="fused-linear-ops"></a>
 ## 融合 linear 算子

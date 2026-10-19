@@ -15,7 +15,7 @@
 | 字段 | 含义 |
 | --- | --- |
 | `name`, `module`, `algos` | 类型名称、LyCORIS 模块类、`ALGO` 名称 -> LyCORIS `network_module` |
-| `diff_weight(t)` | 乘数为 1 时的 dW（fp32，DoRA 之前）；由 `Target.unit_fn` 绑定 |
+| `diff_weight(t)` | 乘数为 1 时的 dW（fp32，DoRA 之前）；由 `Target.unit_fn()` 调用 |
 | `diff_weight_at(t, m)` | 当结果不是 `diff_weight * m` 时，在 `m` 处构建 (dW, db) 的构建器（OFT / BOFT 旋转），或 None |
 | `kernel_diff_weight(t, ops)` | 由层的内核算子在乘数为 1 时实现 W -> dW，或 None |
 | `kernel_merged_weight(t, ops)` | 在乘数为 1 时实现 W -> W + dW，加法在算子内部进行（`base=`），或 None |

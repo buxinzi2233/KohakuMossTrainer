@@ -1,4 +1,4 @@
-[English](../README.en.md)
+[English](../README.md)
 
 <a id="kohakumoss-docs"></a>
 # KohakuMoss 文档

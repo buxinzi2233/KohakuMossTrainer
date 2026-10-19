@@ -374,6 +374,10 @@ DDP 共享主机区域）都保持其放置；训练后导出读取的模型放�
   rank 0 写其余内容），完成后重命名；只列出或恢复已重命名的目录，
   如果保存周期已保存最后一步，就不会重复写入它。
 - **`SAVE_MINUTES`** 每 `LOG_EVERY` 步检查一次，每个 rank 都采用 rank 0 的决定。
+- **`FINAL_CHECKPOINT`** 设置运行结束时的恢复检查点：`"auto"`（默认）仅在
+  `SAVE_EVERY` 或 `SAVE_MINUTES` 开启时写入，`True` / `False` 则强制写入或不写入。
+  无论哪种情况都会写入导出文件（`SAVE_FORMAT`）；全量微调的恢复检查点保存 fp32
+  主权重和优化器状态（每个可训练参数约 15 B）。
 
 <a id="callbacks"></a>
 ### 回调
@@ -381,7 +385,7 @@ DDP 共享主机区域）都保持其放置；训练后导出读取的模型放�
 | 回调 | 输出 |
 | --- | --- |
 | 吞吐量 / MFU、显存峰值 | 指标 |
-| 指标记录 | 控制台 + `metrics.jsonl`、KohakuBoard 或 wandb |
+| 指标记录 | 控制台 + `metrics.jsonl`，或 wandb |
 | 样本 | 在当前模型上通过 `MossPipeline` 生成：每步的图像 + `settings.json` |
 | 验证 | 每个 σ 的固定噪声验证损失（所有 rank 验证批次上的全局逐词元平均值，全部使用条件：无文本 dropout） |
 | 不稳定性转储 | 出现非有限步骤或损失超过其运行平均值的 5× 时，写入 `instability/step_X.json` |

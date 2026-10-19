@@ -17,11 +17,22 @@ Windows 上先激活 venv，再在 PowerShell 或 `cmd` 中使用相同命令：
 ## 步骤
 
 1. **安装**（[install.md](install.md)；Windows 工具链：[install-windows.md](install-windows.md)），然后检查环境：`kohakumoss-doctor`。它会列出每个 GPU 及其架构、已安装的工具链、各操作使用的内核后端，以及所有缺失内容和对应的修复命令。
-2. **下载权重**（~26 GB）：`hf download OpenMOSS-Team/MOSS-Image-Base --local-dir models/MOSS-Image-Base`。
+2. **下载权重**到 ComfyUI models 文件夹（约 15 GB；已安装的 ComfyUI 的 `models/` 可直接使用）：
+
+   ```bash
+   hf download Comfy-Org/MOSS-Image diffusion_models/moss_image_base_int8_convrot.safetensors \
+       text_encoders/qwen3.5_9b_int8_convrot.safetensors vae/flux2-vae_small.safetensors \
+       --local-dir ComfyUI/models
+   ```
+
+   运行会按存储状态在 int8 DiT 和文本编码器上训练。HF 布局用法相同
+   （`hf download OpenMOSS-Team/MOSS-Image-Base --local-dir models/MOSS-Image-Base`，
+   约 26 GB bf16，`--weights models/MOSS-Image-Base`）；每个文件和配置项见
+   [weights.md](weights.md)。
 3. 为你的 GPU 和数据**编写配置**：
 
    ```bash
-   kohakumoss-config new train --weights models/MOSS-Image-Base --data <dataset> --name my-lora
+   kohakumoss-config new train --weights ComfyUI/models --data <dataset> --name my-lora
    ```
 
    它会写入 `configs/user/my-lora.py` 和 `configs/user/my-lora_data.py`；在第一个文件中设置 `STEPS`、`SAMPLE_PROMPTS`（默认：数据集的第一条描述文本，或 `--prompt`）以及其他设置。选项（[configs.md](configs.md)）：
@@ -58,15 +69,15 @@ Windows 上先激活 venv，再在 PowerShell 或 `cmd` 中使用相同命令：
    | `log.txt` | 每行控制台日志：规划、内核决策、警告、错误 |
    | `metrics.jsonl` | 每步指标 |
    | `samples/step_XXXXXXXX/` | 训练期间的采样结果 |
-   | `checkpoints/step_XXXXXXXX/` | 检查点 |
-   | `export/<RUN_NAME>-comfy.safetensors`、`export/<RUN_NAME>-lycoris.safetensors` | 适配器，在运行结束时写入 |
+   | `checkpoints/step_XXXXXXXX/` | 检查点，每个都带有其 `export/`（`CHECKPOINT_EXPORT`） |
+   | `export/<RUN_NAME>-comfy.safetensors`、`export/<RUN_NAME>-lycoris.safetensors` | 适配器（`SAVE_FORMAT`：基础配置写入 `both`），在运行结束时写入 |
 
    中断运行的检查点可通过 `scripts/export/export.py` 导出（[export-to-comfy.md](export-to-comfy.md)）。`comfy` 文件使用 ComfyUI 的 MOSS-Image 模型的键布局（可在那里用 LoRA 加载器节点加载）；第 7 步使用本仓库的流水线对它采样。
 
 7. 使用导出的适配器**采样**（[inference.md](inference.md)）：
 
    ```bash
-   kohakumoss-config new sample --weights models/MOSS-Image-Base --adapter runs/moss/my-lora/export/my-lora-comfy.safetensors --name my-lora-sample
+   kohakumoss-config new sample --weights ComfyUI/models --adapter runs/moss/my-lora/export/my-lora-comfy.safetensors --name my-lora-sample
    kogine run scripts/sample/sample.py --config configs/user/my-lora-sample.py --set PROMPT="a lighthouse on a rocky coast at sunset"
    ```
 
@@ -87,10 +98,12 @@ Windows 上先激活 venv，再在 PowerShell 或 `cmd` 中使用相同命令：
 | GPU | 配方 |
 | --- | --- |
 | 支持 bf16 的 24 GB 显卡（3090、4090、50xx） | `recipes_lora_24g_bf16.py` |
+| RTX 5090 32 GB，最高速度 | `recipes_lora_5090.py` |
 | 仅支持 fp16（V100、2080 Ti） | `recipes_lora_16g_fp16.py` |
 | 12 GB | `recipes_lora_12g_stream.py` |
 | Intel Arc B 系列 | `recipes_lora_xpu_b50.py` |
 | 两个 GPU（Linux） | `recipes_lora_ddp.py` |
+| 四个 RTX 5090（Linux） | `recipes_lora_ddp_4x5090.py` |
 
 - 24 GB bf16 显卡上的其他算法：`recipes_lycoris_loha.py`、`recipes_lycoris_lokr.py`、`recipes_lycoris_oft.py`、`recipes_dora.py`（每个都组合 `vram_24g` 和 `precision_bf16`）。
 - 对于其他任何显卡或精度，使用 `kohakumoss-config new train --algo loha | lokr |
@@ -115,7 +128,9 @@ Windows 上先激活 venv，再在 PowerShell 或 `cmd` 中使用相同命令：
 <a id="sft-weights"></a>
 ## SFT 权重
 
-要在 MOSS-Image-SFT 上训练：
+要从 ComfyUI 文件夹在 MOSS-Image-SFT 上训练，请把
+`diffusion_models/moss_image_sft_int8_convrot.safetensors` 下载到基础文件旁边，并设置
+`--set VARIANT=sft`（DiT 默认值跟随 `VARIANT`；文本编码器和 VAE 共用）。在 HF 布局中：
 
 1. 下载：`hf download OpenMOSS-Team/MOSS-Image-SFT --local-dir
    models/MOSS-Image-SFT`。

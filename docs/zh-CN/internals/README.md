@@ -14,6 +14,7 @@
 | 内存 | [offload.md](offload.md) | 激活卸载、权重流式传输、梯度卸载、CPU 优化器、文本编码器放置 |
 | | [sampling-memory.md](sampling-memory.md) | 一次 generate 调用在各阶段（文本编码、采样、解码）在设备上保留的内容，以及使采样显存占用不高于训练的放置方案 |
 | | [checkpoints.md](checkpoints.md) | 流式检查点写入、内存和磁盘成本 |
+| | [reference-cycles.md](reference-cycles.md) | 不经过张量持有者的引用环：类函数槽位、弱引用钩子和回调 |
 | 文本编码器 | [text-encoder.md](text-encoder.md) | 文本编码器算子和内核、批量 / 打包编码、TextEncoderPlan、提前编码、量化 |
 | 适配器 | [adapter-kinds.md](adapter-kinds.md) | 各算法的适配器记录 |
 | | [adapter-binding.md](adapter-binding.md) | 绑定的适配器前向函数、内核算子、自动调优算子、前向包装器 |

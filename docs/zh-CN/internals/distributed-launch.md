@@ -23,7 +23,9 @@
 - **存储**：`init="tcp"` 显式构建 `TCPStore`。父进程在操作系统分配的端口上持有存储主端，工作进程作为客户端连接，因此端口会在任何工作进程使用之前绑定。
   - Windows wheel 不含 libuv，因此该平台的存储使用 `use_libuv=False`，并在每个工作进程中设置 `USE_LIBUV=0`。
   - Windows 上的存储地址为 `localhost`：字面量 `127.0.0.1` 会在非 libuv 存储内部触发 torch 的格式化错误。
-- **文件初始化**：`init="file"` 在新的临时目录中使用 `file://` 会合。
+- **文件初始化**：`init="file"` 在新的临时目录中使用 `file://` 会合，该目录在作业结束时
+  删除（正常退出、某个 rank 失败，或 launcher 收到 SIGTERM，后者随后终止各 rank 进程）。
+  tcp 初始化不会创建目录。
 - **工作进程**：`fn` 必须是模块级函数，因为生成的进程需要导入它。
 
 <a id="device-binding"></a>

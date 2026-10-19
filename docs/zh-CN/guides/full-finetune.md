@@ -21,11 +21,17 @@
 | --- | --- |
 | 4x 32 GB，使用 FSDP2（Linux） | `recipes_full_fsdp_4xv100.py` |
 | 一个 24 GB GPU，主机主副本 + 权重流式传输 | `recipes_full_24g_offload.py` |
+| 一个 RTX 5090 32 GB，主机主副本 + 权重流式传输，每步 36864 个 token | `recipes_full_5090.py` |
 | 多个 24 GB GPU（Linux），在相同的流式传输配置档上使用 DDP | `kohakumoss-config new train --algo full --gpus N` |
+| PCIe 上的 4x RTX 5090 32 GB（Linux），在 5090 流式传输配置档上使用 DDP | `recipes_full_ddp_4x5090.py` |
+
+全量微调训练 16 位 DiT：在 ComfyUI 文件夹中它使用
+`diffusion_models/moss_image_<VARIANT>_bf16.safetensors`（`ALGO="full"` 的默认值），
+在 HF 布局中则是 `transformer/` 文件夹。
 
 ```bash
 # a config from the presets for this GPU, or one that extends a recipe
-kohakumoss-config new train --algo full --weights models/MOSS-Image-Base --data <dataset> --name my-ft
+kohakumoss-config new train --algo full --weights ComfyUI/models --data <dataset> --name my-ft
 kohakumoss-config new --from full_24g_offload my_ft.py    # then set WEIGHTS / DATASETS in it
 
 # the data passes printed by the first command, then
@@ -55,11 +61,14 @@ kogine run scripts/train/moss.py --config configs/user/my-ft.py
 
 | 条件 | 引擎 |
 | --- | --- |
-| 每个 rank 的 FSDP2 占用（`fsdp` 层的常驻配置档，每个参数、梯度和优化器状态均分片到 N 个 rank；按内存估计）在 `--vram-tolerance` 容差内能放入显卡 | FSDP2 |
+| 运行 `kohakumoss-config` 的机器上 N 张显卡的每一对都具有对等访问（NVLink / P2P），且每个 rank 的 FSDP2 占用（`fsdp` 层的常驻配置档，每个参数、梯度和优化器状态均分片到 N 个 rank；按内存估计）在 `--vram-tolerance` 容差内能放入显卡 | FSDP2 |
 | 否则 | DDP：全量微调显存层的换入换出配置档（`ckpt-ring4-actoff-optstream-gradoff`）在每个 rank 上原样运行，各 rank 共享一份主副本的主机拷贝（[multi-gpu.md](multi-gpu.md#shared-host-masters)） |
 | `--vram auto` | DDP |
 
-因此 4x 32 GB 使用 FSDP2，2x 24 GB 使用 DDP。两个 RTX 3090 在该配置档下使用 DDP，测得 0.356 samples/s（扩展效率 0.79），每张显卡的 nvidia-smi 峰值为 17.3 GiB，总主机 RAM 为 63 GiB。
+因此 NVLink 上的 4x 32 GB V100 使用 FSDP2，而普通 PCIe 上的显卡使用 DDP：在 4x RTX 5090
+（PCIe，无 P2P）上，全量微调在 DDP 下达到 15.3k tok/s，而 FSDP2 下为 8.3k
+（[training-5090.md](../performance/training-5090.md)）。两个 RTX 3090 在该配置档下使用 DDP
+测得 0.356 samples/s（扩展效率 0.79），每张显卡的 nvidia-smi 峰值为 17.3 GiB，总主机 RAM 为 63 GiB。
 
 <a id="fp8--mxfp8-compute-sm89"></a>
 ## fp8 / MXFP8 计算（sm89+）
@@ -74,10 +83,14 @@ kogine run scripts/train/moss.py --config configs/user/my-ft.py
 <a id="exports-and-ema"></a>
 ## 导出与 EMA
 
-| `EXPORT_FORMATS` 条目 | 输出 |
+| `SAVE_FORMAT` | 输出 |
 | --- | --- |
-| `"merged"` | 一个使用无前缀键的 safetensors 文件（[export-to-comfy.md](export-to-comfy.md) 中的单文件 transformer 布局） |
-| `"diffusers"` | 分片的 transformer 文件夹 |
+| `"comfy"`（默认） | `<RUN_NAME>-merged.safetensors`：一个使用无前缀键的 safetensors 文件（[export-to-comfy.md](export-to-comfy.md) 中的 ComfyUI 单文件布局；按 `SAVE_FUSED_QKV` 融合 q / k / v） |
+| `"hf"` | `<RUN_NAME>-diffusers/`：分片的 transformer 文件夹 |
+| `"both"` / `"none"` | 两者 / 都不 |
+
+- 在 ComfyUI 文件夹中，全量微调默认使用 bf16 DiT 文件；int8 文件仅在
+  `BASE_PRECISION="compute"` 下训练（使用其反量化权重，[weights.md](weights.md#dit)）。
 
 - 启用 `EMA` 时，每个检查点都会包含平均权重（`ema.safetensors`）；使用幂次 EMA 时，`kohakumoss.training.ema.posthoc` 可在训练后重建任意 EMA 宽度（[training.md](../concepts/training.md#ema)）。
 - 使用 `scripts/sample/sample.py --set

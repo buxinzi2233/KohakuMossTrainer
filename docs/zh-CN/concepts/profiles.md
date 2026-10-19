@@ -121,7 +121,7 @@
 
 | 配置项 | 计划字段 | 值 | 默认值 | 效果 |
 | --- | --- | --- | --- | --- |
-| `BASE_PRECISION` | `base_precision` | `compute`、`fp8`、`int8`、`quant`（架构具备 fp8 GEMM 时使用 fp8，否则 int8）、`fp8_compute`、`mxfp8` | `compute` | 冻结基座权重的存储方式（`compute`：PRECISION 数据类型；`fp8` / `int8` 仅量化权重）；`fp8_compute` / `mxfp8` 在 sm89+ 上以 fp8 执行 GEMM；参见 [quant-kernels.md](../internals/quant-kernels.md#fp8-compute) |
+| `BASE_PRECISION` | `base_precision` | `auto`、`compute`、`fp8`、`int8`、`quant`（架构具备 fp8 GEMM 时使用 fp8，否则 int8）、`fp8_compute`、`mxfp8` | `auto` | 冻结基座权重的存储方式（`auto`：DiT 文件所存储的格式，16 位文件为 PRECISION 数据类型，预量化文件为其自身的基座；`compute`：PRECISION 数据类型，预量化文件则反量化；`fp8` / `int8` 仅量化权重）；`fp8_compute` / `mxfp8` 在 sm89+ 上以 fp8 执行 GEMM；参见 [quant-kernels.md](../internals/quant-kernels.md#stored-formats) |
 | `FP8_RECIPE` | `fp8_recipe` | `row`, `tensor`, `block` | `row` | `fp8_compute` 的缩放粒度 |
 | `FP8_DGRAD` | `fp8_dgrad` | `fp8`, `16bit` | `fp8` | 输入梯度 GEMM 使用 fp8（保留一份 W^T fp8 副本，每个权重共 2 字节）或 16 位（每个权重 1 字节） |
 

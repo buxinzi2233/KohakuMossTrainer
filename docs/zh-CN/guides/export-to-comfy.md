@@ -3,26 +3,59 @@
 <a id="export-to-comfyui"></a>
 # 导出到 ComfyUI
 
-训练运行结束时，会将 `EXPORT_FORMATS` 指定的格式（默认 `comfy`；随附配置还添加了 `lycoris`）写入 `runs/moss/<RUN_NAME>/export/`。`scripts/export/export.py` 可导出某次运行的任意检查点（中断运行的检查点也可以）。
+训练运行结束时会把导出写入 `runs/moss/<RUN_NAME>/export/`，并在 `CHECKPOINT_EXPORT=True`
+（默认）时写入每个检查点的 `export/` 文件夹；`scripts/export/export.py` 可再次导出任意
+检查点（中断运行的检查点也可以）。
+
+<a id="what-a-run-writes"></a>
+## 一次运行会写出什么
+
+| 控制项 | 取值 |
+| --- | --- |
+| `SAVE_FORMAT` | `comfy`（默认）、`hf`、`both`、`none` |
+| `SAVE_MERGED` | `False`（默认）；`True` 额外写出合并后的 DiT（仅适配器） |
+| `SAVE_FUSED_QKV` | `auto`（默认：与本次运行所训练的 DiT 文件存储 q / k / v 的方式一致；Comfy-Org 文件为融合形式）、`True`、`False` |
+| `CHECKPOINT_EXPORT` | `True`（默认）：每个检查点也保存这些导出 |
+
+| 运行 | `comfy` | `hf` |
+| --- | --- | --- |
+| 适配器 | `<run>-comfy.safetensors`：ComfyUI LyCORIS 文件（`lora_unet_...` 键，按 `SAVE_FUSED_QKV` 融合 q/k/v） | `<run>-lycoris.safetensors`：使用 diffusers 模块键的 LyCORIS 文件 |
+| 适配器，`SAVE_MERGED` | + `<run>-merged.safetensors`：一个 ComfyUI DiT 文件（裸键，bf16） | + `<run>-diffusers/`：HF transformer 文件夹 |
+| 全量微调 | `<run>-merged.safetensors`：一个 ComfyUI DiT 文件 | `<run>-diffusers/` |
+
+- `both` 写出两列；`none` 不写任何导出（检查点仍保存训练状态，`export.py` 可读取）。
+- 构建日志会列出一次导出的文件名及其大小；启用 `CHECKPOINT_EXPORT` 后每个检查点都会增加
+  这些占用（`KEEP_LAST` 会随检查点一起清理它们）。
+- 在 int8 DiT 上运行得到的合并文件，是反量化的基础权重加上 bf16 的 dW。
+- 流水线运行的检查点导出会先把各阶段的适配器交给 rank 0（与最终导出是同一步）。
+- 较早的 `EXPORT_FORMATS` 列表会在校验时映射到这些控制项（一行 INFO）：`comfy` /
+  `lycoris` 是适配器列，`merged` / `diffusers` 是 DiT 列（适配器运行下的 `SAVE_MERGED`），
+  空列表即 `none`。
 
 <a id="exporting"></a>
 ## 导出
 
 ```bash
-# adapter file from a checkpoint
-kogine run scripts/export/export.py --set WEIGHTS=<model dir> \
+# ComfyUI adapter file from a checkpoint (WEIGHTS: the ComfyUI folder or the HF dir)
+kogine run scripts/export/export.py --set WEIGHTS=ComfyUI/models \
     --set ADAPTER=runs/moss/<RUN_NAME>/checkpoints/step_00001000/trainable.safetensors \
     --set OUT=moss_lora.safetensors
-# merged transformer (fused q/k/v like the Comfy-Org repack)
-kogine run scripts/export/export.py --set FORMAT=merged --set FUSED_QKV=True ...
-# adapter file for the fused-q/k/v Comfy-Org repack (see "Fused q/k/v")
-kogine run scripts/export/export.py --set FUSED_QKV=True ...
+# merged transformer (one ComfyUI DiT file)
+kogine run scripts/export/export.py --set FORMAT=merged ...
+# the LyCORIS file
+kogine run scripts/export/export.py --set FORMAT=hf ...
 # merge any adapter files (LyCORIS, ComfyUI, training states) into the base
 kogine run scripts/export/merge.py --config <file with WEIGHTS / ADAPTERS / OUT>
 ```
 
-- 全量微调检查点（`ALGO="full"`）导出为 `merged` 或 `diffusers`。
-- 与其他导出脚本一样，`SAVE_DTYPE`（默认 `bf16`，也可为 `fp16`、`fp32`）是 `export.py` 和 `merge.py` 写入张量的数据类型。
+- `FORMAT`：`comfy`、`hf`（= `lycoris`）、`lycoris`、`merged`、`diffusers`；全量微调检查点
+  （`ALGO="full"`）导出为 `merged`（`comfy`）或 `diffusers`（`hf`）。
+- `FUSED_QKV`（`auto` 默认：与 `WEIGHTS` 存储 q / k / v 的方式一致）为 `comfy` 和 `merged`
+  写出 Comfy-Org 文件的融合布局。
+- 以 ComfyUI 文件夹作为 `WEIGHTS` 时，`TRANSFORMER` / `VARIANT` 像训练时一样挑选 DiT 文件
+  （[weights.md](weights.md)）。
+- 与其他导出脚本一样，`SAVE_DTYPE`（默认 `bf16`，也可为 `fp16`、`fp32`）是 `export.py` 和
+  `merge.py` 写入张量的数据类型。
 
 <a id="loading-the-file"></a>
 ## 加载文件
@@ -76,9 +109,11 @@ with _>.<tensor>` 或 `diffusion_model.<module path>.<tensor>` 键映射到 tran
 - MOSS-Image 模型（`comfy/ldm/moss_image`）在未融合检查点中将它们命名为 `layers.N.proj.{q,k,v}`，在 Comfy-Org 重打包版本中则为 `layers.N.proj.qkv`（按行 q;k;v，`fused_qkv=True`）；
 - 通用 LoRA 键映射（`comfy/lora.py`、`model_lora_keys_unet`）将 `lora_unet_<path with _>` 和 `diffusion_model.<path>` 映射到模型自身的 `<path>.weight` 键。
 
-因此，默认文件面向未融合检查点；融合重打包版本使用下面的 `FUSED_QKV=True` 文件。
+因此，未融合的文件面向未融合检查点，而融合重打包版本使用融合文件。`SAVE_FUSED_QKV` /
+`FUSED_QKV` 为 `auto` 时跟随本次运行所训练的 DiT 文件（Comfy-Org 文件：融合；HF
+transformer 文件夹：未融合）；`True` / `False` 则强制其一。
 
-`FUSED_QKV=True` 配合 `FORMAT="comfy"`，会将每个块的 q/k/v 写成一个 `layers.N.proj.qkv` 层，供融合重打包版本使用：
+融合的 `comfy` 文件会把每个块的 q/k/v 写成一个 `layers.N.proj.qkv` 层：
 
 | q/k/v 层 | 写入形式 |
 | --- | --- |

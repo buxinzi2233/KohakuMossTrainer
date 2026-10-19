@@ -115,7 +115,7 @@ kogine run scripts/export/export.py --set WEIGHTS=ComfyUI/models \
 
 HF 布局的用法完全相同：`hf download OpenMOSS-Team/MOSS-Image-Base --local-dir models/MOSS-Image-Base`
 （约 26 GB，bf16），并传入 `--weights models/MOSS-Image-Base`；每个文件放在哪里，以及全部
-ComfyUI 文件见 [docs/guides/weights.md](docs/guides/weights.md)。
+ComfyUI 文件见 [docs/guides/weights.md](docs/zh-CN/guides/weights.md)。
 
 运行会写入 `runs/moss/<RUN_NAME>/`：`log.txt`、`metrics.jsonl`、样本、检查点（每个检查点都带有
 自己的 `export/`）以及 `export/`（`SAVE_FORMAT`：默认是 ComfyUI LoRA 文件，`hf` 为 LyCORIS

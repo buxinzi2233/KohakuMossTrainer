@@ -398,17 +398,32 @@ fp8 / int8 检查点（`scale_weight` 或 `weight_scale` 键）。文本编码�
 <a id="text-encoder"></a>
 ## 文本编码器
 
-`apply_to_text_encoder(text_model, TextEncoderPlan, device, dtype)` 是训练
-（`build_encoders`、在线文本缓存、采样提示词）、`MossPipeline` 及离线缓存工厂的
-唯一入口。它量化线性层（`precision`），解析 `memory="auto"`，再放置模型
-（`kohakumoss.offload.encoders.text`）：
+`QwenTextEncoder.from_pretrained` 是训练（`build_encoders`、在线文本缓存、采样提示词）、
+`MossPipeline` 及离线缓存工厂的唯一入口。它把检查点直接流式传输到放置位置
+（[text-encoder.md](text-encoder.md#streamed-load)），在加载时量化（`precision`）并在途中
+解析 `memory="auto"`，再放置模型（`place_text`、`kohakumoss.offload.encoders.text`）；
+在内存中构建的模型则走 `apply_to_text_encoder(text_model, TextEncoderPlan, device, dtype)`：
 
 | memory | 两轮之间在设备上保留 | 一轮期间 | 每轮主机到设备传输 |
 | --- | --- | --- | --- |
 | `resident` | 全部 | 全部 | 0 |
-| `offload` | 无 | 除嵌入表外的全部 | 所有权重（锁页副本） |
+| `offload` | 无 | 除嵌入表外的全部 | 所有权重（来自其主机形态） |
 | `ring` | 最终归一化、旋转位置表 | + 每种层类型 `stream_resident` 个槽位的环 | 所有层权重，提前一层预取 |
 | `cpu` | 无（在主机上运行） | 无 | 0 |
+
+`offload` / `ring` 在主机上持有的权重，其主机形态是该计划的 `host`：`copy` 以计算 dtype
+制作主机副本（`pinned` 时使用锁页内存，每个张量一个缓存主机分配器块，向上取整到 2 的幂）；
+`file` 保留检查点的文件页，从可分页内存复制，并由复制过程转换为计算 dtype（`HostCopies` /
+带 `dtypes` 的 `LayerStreamer`）。文件页即页缓存：内存压力下内核会回收它们，并在下一轮
+重新读取。
+
+<a id="host-room"></a>
+### 主机余量
+
+当新增字节当前能放入主机余量的 0.9 倍时，`auto` 选择 `copy`
+（`kohakumoss_common.hostmem.host_room`）：取 /proc/meminfo 的 MemAvailable，与进程的
+memory cgroup 及其每个祖先（v2 为 `memory.max`，v1 为 `memory.limit_in_bytes`）的
+「限制减用量再加可回收的非活跃文件页」两者中最紧的一个；Windows 上则使用可用的物理内存。
 
 在 `offload` / `ring` 下，2 GiB 嵌入表永不移动：执行轮次在主机查找行，只发送这些行。
 每种放置方式的 `end()` 都在调用者下一项工作之前释放该轮设备权重缓冲区（释放环形槽位，
@@ -419,7 +434,9 @@ fp8 / int8 检查点（`scale_weight` 或 `weight_scale` 键）。文本编码�
 将层张量换入槽位，退出时换回主机副本；结构不同的层使用独立槽位池；`h2d_bytes` 统计复制。
 
 `free_after_use` 在首次执行后丢弃所有权重（空提示词嵌入在该轮编码并保留）。文本离线
-缓存时，训练会设置此项：采样提示词在构建时编码一次，随后释放编码器。
+缓存时，训练会设置此项：采样提示词在构建时编码一次，随后释放编码器。释放会连同设备权重
+一起丢弃主机形态，并把缓存主机分配器的空闲锁页块归还系统
+（`torch.accelerator.empty_host_cache`）。
 
 内存模型加入文本编码器（`kohakumoss.offload.encoders.text_memory`）：常驻权重计入
 DiT 步骤峰值；卸载 / 环形流式传输一轮的峰值是 DiT 持久部分加该轮权重和激活（所有打包组

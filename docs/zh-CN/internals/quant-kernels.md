@@ -29,6 +29,38 @@
 在 Ada（sm89）上，采用 `row` 配方的 `fp8_compute` 是速度快的格式；该架构上的
 `mxfp8` 保留其权重字节数优势，但消耗更多计算时间（[实测](#measured-rtx-5090-sm120-bf16-activations)）。
 
+<a id="source"></a>
+## 来源
+
+所有量化器（DiT 基础权重的 `quantize_model`、文本编码器的 `quantize_text_linears`，
+以及两个导出脚本 `fp8_quant.py` / `text_quant.py`）都从检查点存储的数值、而非其活动副本
+量化权重（`kohakumoss.quant.source.source_weight`）：
+
+- 存储的数值每次读取一个张量（先读 safetensors 头部），并在 fp32 中乘以自加载以来所施加的
+  任何折叠的输出行乘数（`kohakumoss.model.io.quant_source.fold_since_load`：在线 fp16
+  修复，相对于 fp16-fix 文件本身已携带的折叠）。
+- 只有当它们能精确舍入到活动权重时才替换它（`(stored * fold).to(live.dtype) == live`）。
+  否则量化的是活动权重：合并进其中的 delta、另一个检查点、未从文件加载的模型。
+- 以活动 dtype 存储、且自加载以来没有折叠的权重不会被再次读取（活动副本本身就是其存储数值）。
+- 该查找对每个权重只运行一次，在模型被量化时（加载 / 内存计划 / 导出），绝不在每步运行。
+  每个量化器对每个模型记录一行 INFO：
+  `base fp8: quantized <n> linears: from the stored values <n>`（DiT）或
+  `text encoder fp8: ...`，并按原因给出活动权重的计数（以自身 dtype 存储、无存储数值、
+  不是存储数值的转换结果）；报告中携带相同的计数（`from_source`、`sources`）。
+
+因此编码值与缩放值取决于检查点，而绝不敢决于计算 dtype：bf16 检查点在 fp16 计算
+（sm75、fp16 训练）下量化结果与 bf16 相同，预量化文件保存的正是加载时量化的编码值。
+fp16 转换会改变低于 fp16 最小正规数（6.1e-5）的 bf16 数值；改为量化该转换结果会使约
+1e-5 的 fp8 编码值移动一步（MOSS-Image `layers.0.proj.q`：9.4M 个编码值中，`fp8` /
+`fp8_compute` row 有 94 个、block 有 45 个、`mxfp8` 有 227 个；Qwen3.5
+`layers.0.mlp.down_proj`：50M 个中 `fp8` 有 1392 个）；`int8` 编码值不会移动。开销：当
+存储 dtype 与计算 dtype 不同（或自加载以来施加过折叠）时，每个量化权重多一次从检查点的
+读取，并在执行量化的设备上多一份它的 fp32 副本。
+
+fp16-fix 文件以自己的 `SAVE_DTYPE` 存储权重。以 `fp16` 写入时，其存储数值是 bf16 权重
+（已折叠）的 fp16 转换结果，由它构建的量化基础权重保存的正是该转换结果的编码值；以
+`bf16` 写入时则保留 bf16 数值。
+
 <a id="weight-only"></a>
 ## 仅权重量化
 
@@ -92,6 +124,151 @@ fp8：`s = max|w_row| / 448`）。
   以及检查必须拒绝的缩放轴错误变体。
 * `scripts/bench/kernel/quant.py`：在 DiT 层形状上对比所有后端与 eager 和已编译的
   反量化 + 矩阵乘法的内核耗时，并给出调优器为每个案例选择的路径。
+
+<a id="rotation"></a>
+## 旋转
+
+`kohakumoss_kernels.hadamard` 定义了 ComfyUI int8 检查点的 ConvRot 旋转。H_g 是
+H4 = [[1,1,1,-1],[1,1,-1,1],[1,-1,1,1],[-1,1,1,1]] 的归一化 Kronecker 幂，g = 4^j。
+它是 comfy-kitchen 构建的常规 Hadamard，而非 Sylvester 版本。H_g 对称且对合，
+其元素为 +-2^-j，在 fp16 / bf16 中精确。
+
+算子 `group_hadamard(x, group)` 是在最后一维上做 x . blockdiag(H_g)。它自身即为逆、
+也是自身的伴随，因此其反向就是该算子本身。
+
+| 后端 | 架构 | 运行内容 |
+| --- | --- | --- |
+| eager（`group_hadamard_eager`） | 全部 | fp16 / bf16：与 H_g 的 16 位矩阵乘法，fp32 累加，一次舍入；其他 dtype：j 级 fp32 四点蝶形阶段（`y_k = sum(x) - 2 x_(3-k)`）以及 2^-j 缩放 |
+| triton | sm70+（也包括 sm70 / sm75 路径）、XPU | 每个程序在 fp32 寄存器中处理一个 [BR, C] 分块，相同的蝶形运算，一次舍入；fp16 / bf16 / fp32 |
+| compile | inductor 可构建之处 | eager 参考实现的 torch.compile |
+
+没有 TileLang 条目。把每个组当作针对 H_g 的 GEMM 来运行的 TileLang 版本，在
+RTX 2080 Ti 和 RTX 3090 上实测比 eager 慢（2080 Ti 上 [4096, 3072] 为 0.27 ms 对
+0.20 ms），因为 g = 256 使其受计算限制。Triton 蝶形运算是受内存限制的，并且同样
+支持 sm70 / sm75。
+
+* **选择。** 每个内核条目都按形状与 compile 路径比较后选择，与块运算相同
+  （[tuning.md](tuning.md#kernel-vs-compile)）。
+* **数值。** 每条路径都用 fp32 求和从 16 位（或 fp32）输入计算 x . H_g，并一次性舍入到
+  输入 dtype。16 位输入乘以 +-2^-j 是精确的，因此 fp32 矩阵乘法累加与 fp32 蝶形运算
+  只在求和顺序上不同。精度表证实了这一点：内核与 eager 在每个均值和中位数统计量上
+  一致到三位数字。它们在 `abs_max` 上最多相差 1.2x，且只出现在接近零的输出的相对
+  统计量上（fp32 表的 `rel_max`）。
+* **开销。** 该算子读写 x 一次。Triton 内核在 RTX 3090 上以 0.243 ms（约 830 GB/s）
+  旋转 [16384, 3072] 的 x，在 RTX 2080 Ti 上为 0.41 ms（约 490 GB/s）。
+
+<a id="rotated-int8-linear"></a>
+## 旋转 int8 线性层
+
+`kohakumoss_kernels.quant.rotated` 提供
+`quant_linear_rotated(x, q, scale, bias, fmt, group)`：ComfyUI 文件的 ConvRot 权重以
+旋转形式存储，W R ~ q * scale，其中 R = blockdiag(H_g) 作用于 K。因此：
+
+* 前向：`y = quant_linear(x R, q, scale, bias)`；
+* 输入梯度：`dx = (dy (q * scale)) R`；
+* 偏置梯度：dy 的 fp32 列和；基础权重没有梯度。
+
+该算子是自定义算子（`kohakumoss::quant_fwd_rot` / `kohakumoss::quant_dgrad_rot`），
+其 autograd 只保存 `q` 和 `scale`，因此它留在 `torch.compile(fullgraph=True)` 图中。
+`kohakumoss.quant.QuantWeight` 为每个权重绑定一次（`fmt`、`group` 为静态）。
+
+| 后端 | 运行内容 |
+| --- | --- |
+| eager | `group_hadamard_eager`，然后是反量化 + 矩阵乘法参考实现（`quant_linear_rotated_reference`） |
+| triton（sm80+、XPU） | 按形状由调优器对比 `separate`（先做 Triton 旋转，再用普通量化内核，后者自行选择其分块或 PyTorch 路径）与融合分块：前向在序言中于 fp32 寄存器里旋转 x 的每个 [BM, g] 分块，dgrad 在尾声中对它的 fp32 累加器分块做旋转 |
+| tilelang（sm70+） | 该设备对应的注册表 `group_hadamard`（Triton 或 compile，按形状选择），然后是 TileLang int8 内核 |
+
+* **数值。** 融合前向在 MMA 之前把旋转后的分块舍入到激活 dtype，与 separate 路径写入的
+  字节相同。融合 dgrad 只舍入一次，在旋转之后；separate dgrad 在旋转前后各舍入一次。
+* **separate 路径的开销。** 每次前向多一次 x 的读写（每次 dgrad 多一次 dx 的读写）。
+  融合前向没有额外的读写过程，但每个输出分块都要把每个 x 分块旋转一次，即 N / BN 次。
+  在 RTX 3090 上实测（[quant-rotate.md](../performance/quant-rotate.md)）：
+  * separate 路径的开销是前向 int8 GEMM 的 1-7%，是前向 + 反向的 1-14%
+    （最小的 GEMM，4096 个 token 上的 3072 x 3072，占 14%）；
+  * 在每个 DiT 形状上，每个融合分块都比 separate 路径慢：前向约 2x
+    （冗余旋转在 CUDA 核心上运行），dgrad 为 1.2-1.3x。
+
+  因此调优器在那里选择 `separate`；融合分块仍作为候选，按显卡计时。
+
+<a id="checks-1"></a>
+### 检查
+
+* `tests/kernels/quant/test_hadamard.py`：
+  * 矩阵对照 fp64 的 `torch.kron` 构建结果；
+  * eager 参考实现对照 fp64（fp32 蝶形运算；16 位结果在一次舍入之内）及其梯度；
+  * 每个 GPU 后端和 compile 路径对照 eager 和 fp64（统计规则），fp16 / bf16 / fp32，
+    前向和反向，并在 fullgraph 编译下；
+  * 反例：Sylvester H、未归一化的 H、非 4 的幂的组。
+* `tests/kernels/quant/test_quant_rotated.py`：
+  * eager 组合对照 fp64（CPU）；
+  * 每个后端，以及每个 Triton 配置单独（separate 和每个融合分块），对照 eager 组合和
+    fp64，前向 / dx / dbias，也在 fullgraph 下；
+  * 反例：不旋转、把旋转放在输出侧，以及把 dgrad 旋转施加到 dy 而不是 dx。
+* `scripts/bench/kernel/rotate.py`：每个后端的旋转本身、普通 int8 线性层、按所选方式的
+  旋转线性层，以及调优器针对每个 DiT 形状和 token 数的 separate 与 fused 计时，并给出
+  对照 fp64 的误差。
+
+<a id="convrot-bases"></a>
+### ConvRot 基础权重
+
+`kohakumoss.quant.QuantWeight(q, scale, fmt, rotation)` 持有存储的 ConvRot 权重
+（带 `convrot` 的 ComfyUI `int8_tensorwise` 文件）：`linear` 一次性绑定到
+`quant_linear_rotated(fmt, group=rotation)`（没有内核可用时为 eager），
+`weight(dtype)` / `materialize()` 给出 W 本身：fp32 反量化的行乘以 H_g（eager 蝶形
+运算），舍入一次。因此适配器（DoRA 范数、OFT、合并导出）、稠密回退和各导出脚本读取的
+都是未旋转的权重。
+
+* **流式传输。** 在权重流式传输下，环形缓冲区携带 `q` 和 `scale`；`StreamedQuantWeight`
+  在 fp32 中反量化该槽位，用设备的 `group_hadamard`（安装时解析一次）旋转它，并一次性
+  舍入到计算 dtype。
+* **折叠。** 缩放存储基础权重行的权重折叠（带 gate 前缩放值的 fp16-fix 折叠）会被拒绝
+  （`fold`）；在线修复和统一 gate 折叠只作用于稠密参数。
+
+<a id="w4a8-weights"></a>
+### W4A8 权重
+
+`kohakumoss.quant.W4A8Weight` 持有 ComfyUI 的 `asym_w4a8_int8` 层：`q` [N, K/2]
+（每字节两个 4 位编码值，偶数列在低半字节；6 位布局另加一个 K/4 的高位平面）、
+`s_rel` e4m3 [N, K/16]、`s_channel` fp32 [N]、一个 16 项的 `codebook`（或均匀网格
+编码 - 8），以及可选的逐组 `correction`。这些编码值精确解码到 int8 网格上，即
+`round(level x s_rel)` 并截断到 +-127，因此该层就是该 int8 网格乘以 `s_channel`，
+以旋转形式存储（ConvRot 256）：
+
+| 路径 | 每权重字节数 | 每次调用 |
+| --- | --- | --- |
+| `to_int8()`（解码一次） | 1 + 4 / K | 旋转 int8 线性层 |
+| 打包（`linear`） | 0.5 + 1 / 16 + 4 / K | 解码（CUDA / XPU 上编译执行，主机上 eager），然后是旋转 int8 线性层 |
+
+两者给出相同的 int8 数值，因此输出也相同。文本编码器通过 `TEXT_ENCODE["w4a8"]`
+在二者之间选择（[text-encoder.md](text-encoder.md)）；流式传输的 DiT 基础权重在进入
+环形缓冲区之前被解码为 int8。带 `correction` 的层没有 int8 形式，会运行其稠密权重。
+开销见 [quant-rotate.md](../performance/quant-rotate.md#w4a8-decode)。
+
+<a id="embedding"></a>
+### 嵌入
+
+`kohakumoss.quant.QuantEmbedding` 是逐行缩放、并在隐藏维度上旋转的 int8 嵌入表
+（ComfyUI 文本编码器的 `embed_tokens`）。查表时收集 int8 行及其缩放值，在 fp32 中
+反量化，用设备的 `group_hadamard` 旋转回来并舍入一次。在文本编码器的 offload / ring
+放置方式下，该表留在主机上，`lookup` 只把收集到的 int8 行和缩放值移到设备。
+
+<a id="stored-formats"></a>
+### 存储格式
+
+存储了量化基础权重的检查点（KohakuMoss fp8 文件、ComfyUI int8 / fp8 / W4A8 文件）
+会在加载时附加它们。随后由内存计划的 `base_precision` 决定
+（`memory.apply.settle_stored`）：
+
+| `base_precision` | 存储的基础权重 |
+| --- | --- |
+| `auto`（所有配置档的默认值） | 按存储原样保留 |
+| 与存储格式相同（例如 `int8`） | 保留；其他线性层量化到该格式 |
+| 其他任何值（包括 `compute`） | 先反量化为稠密权重（一行 INFO），然后应用计划 |
+| 任意值，但基础权重可训练 | 反量化（`compute` / fp8 计算）；`auto` 会被拒绝，并指出 `compute` 这条出路 |
+
+`model.io.load.stored_precision(path)` 从头部和量化记录读取存储格式（不读取权重）：
+规划器的估算在 `auto` 下计入其字节数（`Workload.stored_precision`），各项控制项检查
+在 `auto` 下会拒绝全量微调存储文件。
 
 <a id="fp8-compute"></a>
 ## fp8 计算
@@ -198,7 +375,8 @@ KohakUwULLM 以 MXFP8 训练完整模型，这里的全量微调也一样：
 ### 预量化检查点
 
 `scripts/export/fp8_quant.py` 写出一个 transformer，其中 fp8 计算线性层存储为
-`<n>.weight`（e4m3 q）+ `<n>.weight_scale`（配方的缩放值），其他所有张量为 16 位，
+`<n>.weight`（e4m3 q，从检查点存储的数值量化而来：[来源](#source)）
++ `<n>.weight_scale`（配方的缩放值），其他所有张量为 16 位，
 配方和层列表保存在 safetensors 元数据中（`kohakumoss_fp8`）。
 
 - `load_backbone` 直接附加这些基础权重；不构建 16 位副本。在采样脚本中该文件是
@@ -387,7 +565,7 @@ fp8 MMA 上的 mx promote 路径也无法通过；规划器仅向 sm89 提供 fp
 分块。每条路径都以 bf16 和 fp16，在非整分块形状上检查前向和输入梯度
 （`tests/kernels/quant/test_fp8.py`）。
 
-<a id="checks-1"></a>
+<a id="checks-2"></a>
 ### 检查
 
 * `tests/quant/test_fp8_formats.py`：按配方和角色对照独立 numpy 公式检查 eager 参考实现的

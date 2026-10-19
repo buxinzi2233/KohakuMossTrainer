@@ -17,8 +17,8 @@
 from kohakuengine import use_config
 
 use_config("../user/my-lora.py")   # the train config
-TEXT_ENCODER_KWARGS = {"path": "models/MOSS-Image-Base", "device": "cuda"}
-IMAGE_ENCODER_KWARGS = {"path": "models/MOSS-Image-Base", "device": "cuda"}
+TEXT_ENCODER_KWARGS = {"path": "ComfyUI/models", "device": "cuda"}
+IMAGE_ENCODER_KWARGS = {"path": "ComfyUI/models", "device": "cuda"}
 ```
 
 `configs/data/kohya/kohya_style.py` 是一个独立示例（设置 `data_root` 和 `WEIGHTS`）；与训练配置一样，它的缓存写入 `<data_root>/cache`，当运行的关键配置项（[data.md](../concepts/data.md#cache-keys)）与示例相等时，就会读取这些缓存。
@@ -93,7 +93,7 @@ kogine run scripts/data/cache_latents.py --config configs/data/my_data.py
 
 | 工厂 | 加载内容 | `path` |
 | --- | --- | --- |
-| `kohakumoss.encoders.vae_encoder(path, device, dtype, ...)` | FLUX.2 VAE；返回其 `encode_images`，并附带 VAE 的计算规格 | `vae/` 文件夹或流水线根目录 |
+| `kohakumoss.encoders.vae_encoder(path, device, dtype, ...)` | FLUX.2 VAE；返回其 `encode_images`，并附带 VAE 的计算规格 | `vae/` 文件夹、流水线根目录或单个 VAE 文件（[weights.md](weights.md#vae)） |
 | `kohakumoss.encoders.text_encoder(path, device, dtype, plan)` | Qwen3.5 文本编码器（`plan`：TextEncoderPlan 字段，在加载权重前针对设备进行检查） | 流水线根目录或 `text_encoder/` 文件夹 |
 
 放置方式：

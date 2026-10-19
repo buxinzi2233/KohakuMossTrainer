@@ -174,7 +174,7 @@ Windows 工具链和功能矩阵见 [install-windows.md](install-windows.md)。
 | `quant` | `bitsandbytes` | `OPTIMIZER="adamw8bit"`（bitsandbytes 8 位 AdamW） |
 | `optim` | `prodigyopt`、`schedulefree` | `OPTIMIZER="prodigy"` / `"schedule_free"` |
 | `parquet` | `pyarrow` | `parquet` 数据集来源 |
-| `board` / `wandb` | `kohakuboard` / `wandb` | `LOGGER="board"` / `"wandb"` |
+| `wandb` | `wandb` | `LOGGER="wandb"` |
 | `dev` | pytest、ruff、black、lpips + `bench` | 测试和 lint（脚本测试会导入每个脚本） |
 | `bench` | matplotlib、pandas | 基准测试、fp16 修复图表 |
 | `baselines` | flash-linear-attention、causal-conv1d | 仅用于对比基准测试 |
@@ -187,8 +187,6 @@ Windows 工具链和功能矩阵见 [install-windows.md](install-windows.md)。
 <a id="prebuilt-wheels"></a>
 ## 预构建 wheel
 
-- `kohakuvault`（依赖）和 `kohakuboard`（可选依赖组 `board`）从 wheel 安装：
-  对 CPython 3.10 - 3.13 上的 win_amd64 和 manylinux_2_28 x86_64 执行
-  仅二进制解析（`uv pip compile --only-binary :all:`），可以找到最新发布的
-  `kohakuvault 0.9.0`（及其依赖 numpy）和 `kohakuboard 0.0.1`。
-- `kohakuboard` 的依赖 `click-completion` 从其纯 Python 源码分发包安装。
+- `kohakuvault`（依赖）从 wheel 安装：对 CPython 3.10 - 3.13 上的 win_amd64 和
+  manylinux_2_28 x86_64 执行仅二进制解析（`uv pip compile --only-binary :all:`），
+  可以找到最新发布的 `kohakuvault 0.9.0`（及其依赖 numpy）。

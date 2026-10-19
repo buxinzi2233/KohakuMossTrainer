@@ -15,8 +15,8 @@
 ## 通过标志生成起始配置
 
 ```bash
-kohakumoss-config new train --weights path/to/MOSS-Image-Base --data path/to/dataset
-kohakumoss-config new sample --weights path/to/MOSS-Image-Base --adapter runs/moss/my-lora/export/my-lora-comfy.safetensors
+kohakumoss-config new train --weights ComfyUI/models --data path/to/dataset
+kohakumoss-config new sample --weights ComfyUI/models --adapter runs/moss/my-lora/export/my-lora-comfy.safetensors
 kohakumoss-config list
 kohakumoss-config check configs/user/my-lora.py
 ```
@@ -64,7 +64,8 @@ kohakumoss-config wizard
 
 | 组 | 层 | 设置内容 |
 | --- | --- | --- |
-| `_base` | `base_lora`（`base_full` = base_lora + algo_full） | 权重 / 数据占位项、目标函数、调度、缓存、采样 |
+| `_base` | `base_lora`（`base_full` = base_lora + algo_full） | 权重（ComfyUI models 文件夹）/ 数据占位项、目标函数、调度、缓存、采样、导出（SAVE_FORMAT 为 `both`） |
+| `weights` | `comfy`、`hf` | WEIGHTS 与各组件文件：列出每个 ComfyUI 文件，或使用 HF pipeline 文件夹（[weights.md](weights.md)） |
 | `algo` | `lora`、`loha`、`lokr`、`oft`、`dora`、`full` | ALGO、DIM、ALPHA、ALGO_KWARGS、DROPOUT、LR；`full`：优化器、EMA、导出、`ckpt-resident` |
 | `data` | `kohya`、`folder`、`folder_nl`、`jsonl`、`parquet`、`webdataset`、`moss_shard` | 包含每个数据源参数的 DATASETS 条目模板、CAPTION、ASPECT_RANGE |
 | `vram` | `6g`、`8g`、`12g`、`16g`、`24g`、`auto`、`24g_full` | MEMORY_PROFILE、MAX_TOKENS、TEXT_ENCODE、VAE_ENCODE；`6g`：离线缓存；`6g` / `8g`：SAVE_MINUTES 30；`24g_full`：AdamW、关闭 EMA |
@@ -135,7 +136,7 @@ kohakumoss-config wizard
 | --- | --- | --- |
 | 训练器进程及其 `NUM_WORKERS` 个加载器工作进程（Windows 上为生成的进程，每个都导入 torch） | 始终 | 基准矩阵为每次运行预留 8（`kohakumoss_bench/plan/hostmem.py`） |
 | DiT，在放置之前加载到主机 | 构建时 | 9.47 |
-| 文本编码器，读入主机 RAM | 构建时，当 `SAMPLE_EVERY > 0` 或 `TEXT_CACHE` 不是 `offline` 时；使用离线文本缓存时，在处理完采样提示词后释放 | 15.63 |
+| 文本编码器，从其文件页流式传输到放置位置（[流式加载](../internals/text-encoder.md#streamed-load)） | 当 `SAMPLE_EVERY > 0` 或 `TEXT_CACHE` 不是 `offline` 时；使用离线文本缓存时，在处理完采样提示词后释放 | 仅对 `ring` / `offload` 复制到主机的部分私有（`host` 为 `copy`：bf16 / fp16 下 15.63，使用锁页内存时按张量向上取整；`host` 为 `file`：无，文件页即页缓存），以及加载时量化并保留在主机上的层 |
 | 流式传输的 DiT 块，使用锁页内存（共 42 个块，每块 0.21；设备保留 `stream_resident` 个块） | 流式传输配置档 | 约 5.5（`balanced`）至 8.4（两个常驻块） |
 | 卸载的激活值（块输入，每块一份，使用向上取整到 2 的幂的锁页缓冲区） | `act_offload` | 4352 个 token 时约 1，8192 时约 2 |
 | 适配器主副本、矩估计和梯度累加和（每个可训练参数 16 字节） | `optim_state` 为 `stream` / `cpu`，`grad_offload` | `attn-mlp` 上 LoRA DIM 32（74 M 参数）约 1.1 |
@@ -147,7 +148,7 @@ kohakumoss-config wizard
 | `8g` | 接近 32 GiB（进程、流式传输块和文本编码器） | 约 19 GiB |
 | `24g`（`balanced`） | 接近 29 GiB | 约 14 GiB |
 
-设置 `SAMPLE_EVERY = 0` 且两个缓存均为离线时，只读取缓存，文本编码器留在磁盘上，因此去掉了 15.63 GiB 的构建峰值。全量微调见 [full-finetune.md](full-finetune.md#host-ram)。
+设置 `SAMPLE_EVERY = 0` 且两个缓存均为离线时，只读取缓存，文本编码器留在磁盘上。全量微调见 [full-finetune.md](full-finetune.md#host-ram)。
 
 <a id="multi-gpu-layers"></a>
 ### 多 GPU 层
@@ -180,7 +181,7 @@ kohakumoss-config wizard
 - 它写入该显卡训练显存层的 `MEMORY_PROFILE`（低于 6 GiB 时使用 `6g` 层的配置档；高于最大层时不设配置档，整个 DiT 常驻），因此采样时保留 DiT 的方式与该显卡上的训练相同；
 - 它不设置 `TEXT_ENCODE` / `VAE_ENCODE`：两者均为 `auto`，即能与 DiT 共存的最快放置方式（[sampling-memory.md](../internals/sampling-memory.md)）。
 
-基础权重大小为 9.47 GiB（transformer，bf16）、15.63 GiB（文本编码器，bf16）和 0.23 GiB（VAE）。
+基础权重大小为 9.47 GiB（transformer，bf16）、15.63 GiB（文本编码器，bf16）和 0.23 GiB（VAE）；ComfyUI int8 文件为 5.04 GiB（DiT 文件）和 9.08 GiB（文本编码器文件，其中的 vision tower、MTP 和 LM head 不会被加载）。
 
 <a id="recipes"></a>
 ## 配方
@@ -243,3 +244,26 @@ kohakumoss-config wizard
 | 数据 | `kohakumoss_data.data_problems` |
 
 层在其脚本的基础配置（`base_lora` / `base_sample`）之上接受检查，或在其通过私有 `_BASE = "<path>"` 指定的基础配置之上接受检查（kogine 忽略以 `_` 开头的名称）。
+
+<a id="knob-types"></a>
+## 配置项类型
+
+kogine 会依据脚本所绑定的配置项的默认值（或注解）强制转换 `--set` 值。数据脚本和加载器基准也会接受
+其所属脚本的每个配置项，即 `scripts/train/moss.py` 和数据脚本所在文件夹
+（`kohakumoss_common.knobs` 中的 `check_script(globals(), owners=...)`）：这类配置项的字符串值会以
+相同方式针对第一个绑定它的所属脚本进行转换，因此
+`kogine run scripts/data/cache_text.py --set TARGET_AREA=262144` 会得到 int 262144，与训练脚本一致。
+只有当某个所属脚本的配置项收到字符串值时才会读取该所属脚本，每次检查读取一次，且从源码读取
+（`kohakumoss_common.script_schema.static_schema`）：由字面量、算术、内置类型以及更早的此类配置项
+构建出的默认值和注解——这是对文件的解析，不导入任何内容。默认值或注解需要其他东西的配置项
+（`SAMPLE_PROMPTS`，以 kogine 的 `FormatArg` 注解），或模块级代码除了导入、定义、普通赋值和
+`__main__` 守卫之外还执行其他操作的所属脚本，则改用 `kohakuengine.introspect_schema` 读取：它会导入
+所属模块（其 `main()` 不会运行；`scripts/train/moss.py` 会导入训练器），并把其文件夹加入 `sys.path`。
+`tests/scripts/test_knob_coercion.py` 检查这两种读取方式在每个所属脚本的配置项上结果一致。转换失败时
+保留字符串，并给出 kogine 的警告；若没有任何所属脚本以默认值或注解绑定某个字符串配置项，则属于配置项
+错误。
+
+配置文件中的值保持其 Python 类型。`kohakumoss_data.type_problems` 会依据每个数据配置项的
+`DataConfig` 注解（`kohakumoss_common.typecheck`）检查它：int、float（int 也是 float）、bool、str、
+元组和列表（逐项检查）、dict、Optional 和联合类型。`data_problems` 会单独报告类型错误，数据脚本会在
+构建数据集之前因之退出，例如 `TARGET_AREA='262144' is not int`。

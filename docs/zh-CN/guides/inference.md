@@ -17,18 +17,20 @@
 ## CLI
 
 `scripts/sample/sample.py` 是一个 kogine 脚本：每项设置都是模块级配置项，
-可在配置文件中或通过 `--set` 设置。`WEIGHTS` 是 README 中下载的流水线目录
-（`models/MOSS-Image-Base`，包含 `transformer/`、`text_encoder/`、`vae/`）：
+可在配置文件中或通过 `--set` 设置。`WEIGHTS` 是 README 中下载的 ComfyUI models 文件夹
+（`ComfyUI/models`；`TRANSFORMER`、`TEXT_ENCODER`、`VAE` 指定其文件，默认是 int8 DiT 和
+文本编码器），或 HF 流水线文件夹（`models/MOSS-Image-Base`，包含 `transformer/`、
+`text_encoder/`、`vae/`）；见 [weights.md](weights.md)：
 
 ```bash
-kogine run scripts/sample/sample.py --set WEIGHTS=models/MOSS-Image-Base \
+kogine run scripts/sample/sample.py --set WEIGHTS=ComfyUI/models \
     --set PROMPT="a cat" --set ADAPTERS=my_lora.safetensors:0.8 --set OUT=out/samples
 ```
 
 配置文件包含相同的配置项：
 
 ```python
-WEIGHTS = "models/MOSS-Image-Base"
+WEIGHTS = "ComfyUI/models"
 PROMPTS = ["a cat", "a dog"]
 SIZES = [(1024, 1024), (832, 1216)]  # (H, W) or "HxW" per prompt; the last repeats
 SEEDS = [0, 1]  # missing seeds are SEED_BASE + index
@@ -108,7 +110,7 @@ import torch
 from kohakumoss.inference import MossPipeline
 
 pipe = MossPipeline.from_pretrained(
-    "models/MOSS-Image-Base",    # one pipeline dir, or a root with base/ (and sft/)
+    "ComfyUI/models",            # a ComfyUI models folder, a pipeline dir, or a root with base/ (and sft/)
     dtype=torch.bfloat16,
     adapters=[("my_lora.safetensors", 0.8)],
     adapter_mode="merge",        # or "bypass"
@@ -145,11 +147,17 @@ out.images[0].save("cat.png")
 <a id="weights-root"></a>
 ### 权重根目录
 
-`path` 是一个流水线文件夹，或包含 `base/`（以及 `sft/`）子文件夹的根目录。
+`path` 是一个 ComfyUI models 文件夹：`transformer`、`text_encoder_file`、`vae_file`
+（`TRANSFORMER`、`TEXT_ENCODER`、`VAE`）指定其文件，各自为空字符串 `""` 时使用默认值
+（`moss_image_<variant>_int8_convrot`、`qwen3.5_9b_int8_convrot`、`flux2-vae_small`，
+各自回退到下一个存在的文件；[weights.md](weights.md#comfyui-layout)）。
+
+否则 `path` 是一个流水线文件夹，或包含 `base/`（以及 `sft/`）子文件夹的根目录。
 `variant`（`VARIANT`，默认 `"base"` 或 `"sft"`）是架构预设：
 
-- 每个组件若存在于 `path/variant`，就从该文件夹读取，否则从 `path/base`
-  读取（会记录日志）。只包含 transformer 的 SFT 文件夹会使用 base 的
+- 每个组件在 `path/variant` 持有其权重（即含有 safetensors 文件的组件文件夹）时从该
+  文件夹读取，否则从 `path/base` 读取（会记录日志）。只包含 transformer 权重
+  （其 `text_encoder/` 和 `vae/` 只有配置而无权重）的 SFT 文件夹会使用 base 的
   文本编码器和 VAE。
 - 没有 `path/variant` 文件夹时，`path` 本身就是流水线文件夹。
 - 如果根目录没有所请求变体的文件夹（例如在只有 `base/` 的根目录上请求 `sft`），
@@ -233,10 +241,14 @@ out.images[0].save("cat.png")
 每个 1 byte，另加其缩放值），并以 fp8 执行其 GEMM，每次调用都量化激活。
 `BASE_PRECISION` 的 int8 / fp8 是仅权重量化格式。
 
+- `BASE_PRECISION = "auto"`（默认）按 DiT 文件存储的内容运行：ComfyUI int8 文件使用其
+  int8 ConvRot 基础权重（无配置档时常驻），16 位文件使用 16 位；`"compute"` 会反量化
+  int8 文件（[weights.md](weights.md#dit)）。
 - 量化的 `BASE_PRECISION` 会让 DiT 使用 `speed` 配置档，除非 `MEMORY_PROFILE`
   明确指定了配置档（Python 中为 `memory_overrides={"base_precision": ..., "fp8_recipe":
   ...}`）。
-- 文本编码器接受相同的格式（`TEXT_ENCODE["precision"]`）。
+- 文本编码器接受相同的格式（`TEXT_ENCODE["precision"]`，默认 `auto`：ComfyUI int8 /
+  W4A8 文件保留其存储的层）。
 
 RTX 5090、1024^2、2 个提示词配合 CFG 执行 20 步（`scripts/probe/fp8_inference.py`）：
 
@@ -326,7 +338,7 @@ kogine run scripts/sample/compare_grid.py --config my_grid.py
 ```
 
 ```python
-WEIGHTS = "models/MOSS-Image-Base"
+WEIGHTS = "ComfyUI/models"
 CHECKPOINTS = [
     "runs/quality/quality-lora8/checkpoints/step_00000100/trainable.safetensors",
     "runs/quality/quality-lora8/checkpoints/step_00000200/trainable.safetensors",

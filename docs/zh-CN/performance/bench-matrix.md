@@ -138,6 +138,10 @@ ncu 分析对每个池的一次训练运行记录第 `warmup + 1 .. warmup + ncu
 
 ncu 进程失败（sudo、不支持的指标）记为 `profile-failed`：加入待审查队列，队列继续执行。
 
+每个 GEMM / flash 内核达到的 TFLOP/s 相对其时钟推导峰值的对比，以及张量流水线占用率
+（tensor-pipe %）在各架构上与它的关系，见
+[gemm-efficiency.md](gemm-efficiency.md)（`measure/tflops.py`、`measure/ceiling.py`）。
+
 <a id="coverage"></a>
 ## 覆盖情况
 

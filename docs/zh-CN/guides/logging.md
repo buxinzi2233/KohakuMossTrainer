@@ -32,7 +32,7 @@ WARNING。
 | 配置项 | 默认值 | 设置内容 |
 | --- | --- | --- |
 | `LOG_EVERY` | 10 | 控制台步骤日志行（仅在关闭进度条时）；`METRICS_EVERY` 的默认值 |
-| `METRICS_EVERY` | None（= `LOG_EVERY`） | 向接收端（`metrics.jsonl`、KohakuBoard、wandb）写入指标行，以及填充这些行的吞吐量、显存和编码器占比监视器；1 = 每步 |
+| `METRICS_EVERY` | None（= `LOG_EVERY`） | 向接收端（`metrics.jsonl`、wandb）写入指标行，以及填充这些行的吞吐量、显存和编码器占比监视器；1 = 每步 |
 | `PROGRESS` | True | 进度条 |
 | `LOGGER` | `console` | 除 `metrics.jsonl` 外的接收端（[接收端](#sinks)） |
 
@@ -80,19 +80,17 @@ WARNING。
 | `LOGGER` | 接收端 |
 | --- | --- |
 | `console` | 无其他接收端；控制台显示进度条或步骤日志行 |
-| `board` | 位于 `<output>/board` 下的 KohakuBoard |
 | `wandb` | 使用 wandb 自身默认模式的 wandb 运行（设置了 `WANDB_MODE` 则使用该值，否则在线），写入运行目录下；`WANDB_MODE=offline` 使其保留在本地（之后可用 `wandb sync` 同步） |
 
 无论使用哪种日志记录器，控制台显示的内容都与 `LOGGER="console"` 完全相同：
-wandb 静默运行，不捕获控制台输出；KohakuBoard 将自己的日志行写入
-`<output>/board/kohakuboard.log`，不捕获 stdout / stderr。
+wandb 静默运行，不捕获控制台输出。
 
 <a id="fresh-and-resumed-runs"></a>
 ### 新运行与恢复运行
 
 - 如果不恢复的运行（`RESUME=""`，或 `"latest"` 但尚无检查点）使用了已有
-  `<output>`，则首先将先前尝试的 `metrics.jsonl`、`log.txt` 和 `board/`
-  移到首个可用的 `metrics.<n>.jsonl`、`log.<n>.txt`、`board.<n>`，
+  `<output>`，则首先将先前尝试的 `metrics.jsonl` 和 `log.txt`
+  移到首个可用的 `metrics.<n>.jsonl`、`log.<n>.txt`，
   每次移动都会发出一条 WARNING（`fresh run: an earlier metrics.jsonl in <output> moved to
   <output>/metrics.1.jsonl`）。
 - 恢复的运行会追加写入这些文件。`metrics.jsonl` 中恢复步骤之后的行

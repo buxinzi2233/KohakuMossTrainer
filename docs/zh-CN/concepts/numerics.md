@@ -80,6 +80,11 @@ safetensors 元数据（`kohakumoss_fp16_fix`）中。
   因为流的 rms 远高于 `sqrt(eps) / c`，而 `EPS_CHECK = True` 会在真实权重上测量该差异。
 - **KohakuMoss** 读取元数据：将模型记录为已折叠状态（保存器和适配器导出会撤销折叠），
   并通过 `fp16_fix_eps="exact"` 切换到精确 eps。
+- **量化基座**在由该文件构建时，会对它存储的数值做量化
+  （[quant-kernels.md](../internals/quant-kernels.md#source)）。以
+  `SAVE_DTYPE="fp16"` 写入的文件（随附文件）得到的是折叠后 bf16 权重的 fp16 转换，
+  因此由它得到的 `int8` / `fp8` / `fp8_compute` / `mxfp8` 基座保存的是该转换后的编码；
+  只有以 `SAVE_DTYPE="bf16"` 写入的文件才保留 bf16 数值（折叠因子是 2 的幂，在 bf16 中精确）。
 
 <a id="adapters-and-gradients"></a>
 ### 适配器与梯度
