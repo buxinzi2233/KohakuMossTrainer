@@ -1,4 +1,4 @@
-[英文原文](../../concepts/adapters.md)
+[English](../../concepts/adapters.md)
 
 <a id="adapters"></a>
 # 适配器

@@ -1,4 +1,4 @@
-[英文原文](../../concepts/training.md)
+[English](../../concepts/training.md)
 
 <a id="training"></a>
 # 训练

@@ -1,4 +1,4 @@
-[英文原文](../../concepts/model.md)
+[English](../../concepts/model.md)
 
 <a id="model"></a>
 # 模型

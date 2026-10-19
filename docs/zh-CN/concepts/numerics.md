@@ -1,4 +1,4 @@
-[英文原文](../../concepts/numerics.md)
+[English](../../concepts/numerics.md)
 
 <a id="numerics"></a>
 # 数值计算

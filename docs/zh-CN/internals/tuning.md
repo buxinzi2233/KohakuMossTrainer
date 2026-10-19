@@ -1,4 +1,4 @@
-[英文原文](../../internals/tuning.md)
+[English](../../internals/tuning.md)
 
 <a id="tuning"></a>
 # 调优

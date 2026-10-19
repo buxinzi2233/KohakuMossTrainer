@@ -1,4 +1,4 @@
-[英文原文](../../concepts/profiles.md)
+[English](../../concepts/profiles.md)
 
 <a id="memory-profiles"></a>
 # 内存配置档

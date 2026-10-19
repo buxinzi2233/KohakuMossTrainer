@@ -1,4 +1,4 @@
-[英文原文](../../concepts/data.md)
+[English](../../concepts/data.md)
 
 <a id="data-pipeline"></a>
 # 数据流水线

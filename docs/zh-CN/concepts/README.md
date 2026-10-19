@@ -1,4 +1,4 @@
-[英文原文](../../concepts/README.md)
+[English](../../concepts/README.md)
 
 <a id="concepts"></a>
 # 概念

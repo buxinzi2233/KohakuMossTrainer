@@ -1,4 +1,4 @@
-[英文原文](../../concepts/seqinfo.md)
+[English](../../concepts/seqinfo.md)
 
 <a id="seqinfo-and-packing"></a>
 # SeqInfo 与打包
