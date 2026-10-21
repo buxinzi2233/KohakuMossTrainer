@@ -15,7 +15,7 @@ from torch import Tensor, nn
 from kohakumoss.encoders.specs import SpecEncoder, vae_spec
 from kohakumoss.encoders.vae.comfy import load_vae_file
 from kohakumoss.offload.encoders.vae import place_vae
-from kohakumoss.weights import VAE, comfy_file, is_comfy_folder
+from kohakumoss.weights import VAE, comfy_file, hf_root, is_comfy_folder
 from kohakumoss_kernels import compile_setup
 from kohakumoss_kernels.dtypes import BY_NAME
 from kohakumoss_kernels.hardware.arch import arch_of
@@ -44,17 +44,19 @@ BATCH_PIXELS = 4 * 1024 * 1024
 
 
 def _has_bf16(device: torch.device) -> bool:
+    """bf16 on `device`: a CUDA card that has it (or one this process cannot query),
+    XPU, and the host (natively, or through `host_gemm`'s fp32-accumulated 16-bit
+    GEMMs)."""
     match device.type:
         case "cuda":
-            return torch.cuda.is_available() and arch_of(device).has_bf16
-        case "xpu":
-            return True
-    return False
+            return not torch.cuda.is_available() or arch_of(device).has_bf16
+    return True
 
 
 def resolve_vae_dtype(name: str | torch.dtype, device) -> torch.dtype:
-    """VAE_DTYPE -> torch dtype on `device`: `auto` is bf16 where the device has bf16,
-    else fp16 when fp16 is safe, else fp32."""
+    """VAE_DTYPE -> torch dtype for `device`, the device the latents and decodes are
+    for (whatever the VAE's placement): `auto` is bf16 where the device has bf16, else
+    fp16 when fp16 is safe, else fp32."""
     if isinstance(name, torch.dtype):
         return name
     if name != "auto":
@@ -65,6 +67,14 @@ def resolve_vae_dtype(name: str | torch.dtype, device) -> torch.dtype:
     if device.type != "cpu" and FP16_PROBLEM is None:
         return torch.float16
     return torch.float32
+
+
+def vae_encoder_spec(
+    path: str | Path = "", device: torch.device | str = "cuda", dtype="auto", **_
+) -> str:
+    """The `encoder_spec` `vae_encoder(...)` gives for the same arguments, without
+    loading the weights."""
+    return vae_spec(resolve_vae_dtype(dtype, device))
 
 
 def vae_dtype_problems(name: str, device) -> list[str]:
@@ -104,7 +114,7 @@ def vae_encoder(
         spec["compile"] = "on" if compile else "off"
     vae = FluxVae.from_pretrained(path, "cpu", resolved, mode)
     placed = place_vae(vae, spec, device)
-    return SpecEncoder(placed.encode_images, vae_spec(resolved))
+    return SpecEncoder(placed.encode_images, vae_encoder_spec(path, device, resolved))
 
 
 def to_pixels(image: np.ndarray, device, dtype) -> Tensor:
@@ -157,13 +167,13 @@ class FluxVae(nn.Module):
         dtype: torch.dtype = torch.float32,
         mode: str = "mode",
     ) -> "FluxVae":
-        """`path` is the VAE dir, a pipeline root containing `vae/`, one safetensors
-        file (diffusers or BFL keys, e.g. ComfyUI's `flux2-vae_small` / `flux2-vae`) or
-        a ComfyUI models folder (its default VAE file). Loaded in fp32 (the
+        """`path` is the VAE dir, a pipeline root containing `vae/`, an HF weights root
+        (its `base/` VAE), one safetensors file (diffusers or BFL keys, e.g. ComfyUI's
+        `flux2-vae_small` / `flux2-vae`) or a ComfyUI models folder (its default VAE
+        file). Loaded in fp32 (the
         normalisation statistics stay fp32), then the VAE is cast to `dtype`."""
         path = Path(path)
-        if is_comfy_folder(path):
-            path = comfy_file(path, VAE)
+        path = comfy_file(path, VAE) if is_comfy_folder(path) else hf_root(path, VAE)
         if path.is_file():
             vae = load_vae_file(path)
         else:

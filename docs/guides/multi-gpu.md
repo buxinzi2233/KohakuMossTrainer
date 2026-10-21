@@ -47,6 +47,18 @@ table with one message each:
 | `fsdp` | `off` | `gpu` | `compute` | no | no |
 | `pipeline`, `threaded` | `off` | `gpu` | `compute` | no | no |
 
+One line per mode, what it runs:
+
+- `ddp`: every memory plan, offload included (stock torch DDP: every plan whose
+  trainable gradients stay on the device until the step, so no streamed base, no
+  `fused_step`, no `grad_offload`).
+- `fsdp`: checkpointing (`CHECKPOINT` block / selective / partial:<f>), no memory offload.
+- `pipeline`: checkpointing (every `CHECKPOINT`), no memory offload.
+- `threaded`: checkpointing (every `CHECKPOINT`; the async schedule with per-micro-batch
+  adapter state needs `gpipe` or `checkpoint='none'`), no memory offload.
+
+Each refusal names what the mode runs instead.
+
 - `ddp` runs every memory profile that runs on one GPU (`ckpt-ring*`, `*-gradoff`,
   `*optfused*`, `*-optcpu`, `*-optstream`, `low`, `minimal`, the full-finetune `swap`
   profiles); every trainable gradient is summed across ranks before the optimiser
@@ -81,6 +93,11 @@ reduce-scattered:
 | --- | --- | --- |
 | `"step"` (default) | on the last micro-batch only (`set_requires_gradient_sync`); one per step | the unsharded gradients of the whole model (4 B per parameter for fp32 masters; the memory estimate counts them) |
 | `"micro"` | after every micro-batch; `GRAD_ACC` per step | sharded gradients only |
+
+`FSDP_RESHARD` sets when a block's gathered parameters are freed: `"forward"` (default,
+ZeRO-3) after its forward, gathered again in backward; `"backward"` (ZeRO-2) after its
+backward, one gather per micro-batch with every block held unsharded at the start of
+backward (the memory estimate counts them).
 
 ## Data parallel (`ddp`)
 
@@ -364,8 +381,19 @@ The `TRACE_STEPS` kernel timeline gives, per step:
   kernels), `trace_comm_exposed_ms` (NCCL time with no compute kernel running),
   `trace_copy_ms`, `trace_idle_ms` (no kernel or copy running) and the busy / compute
   fractions.
+- `trace_phase_<p>_ms` for `p` in data, forward, backward, recompute, optimizer and
+  other: the union of the compute kernels launched inside that step phase. The drivers
+  open a profiler range per micro-batch around the host-to-device batch (`data`), the
+  forward and the backward, and one around the optimiser step; every checkpoint
+  recompute runs in a `recompute` range (`kohakumoss.logging.phases`). A kernel belongs
+  to the innermost range open, on any host thread, when it was launched, so the
+  autograd thread's kernels count as backward and a recompute inside backward counts
+  as recompute. A kernel launched outside every range is `other`.
+- `<output>/ranks/trace.rank<r>.kernels.json` lists, per phase, the 40 kernels with the
+  most device time (ms and calls per step).
 - Under the pipelines an NCCL receive kernel spins while it waits for its peer, so there
-  `trace_comm_ms` includes waiting; `1 - trace_compute_frac` is the bubble.
+  `trace_comm_ms` includes waiting; `1 - trace_compute_frac` is the bubble. Under DDP the
+  same spin counts the wait for the slowest rank.
 
 The `TRACE_STEPS` steps run slower (CUPTI tracing). The steps of either window are left
 out of the steady-state summary.

@@ -68,7 +68,7 @@ source .venv/bin/activate
 
 手动安装（此处为 CUDA 13 驱动；`nvidia-smi` 会显示你的版本：cu126 / cu128 / cu130），
 可从 PyPI 安装，或从克隆目录使用 `-e ".[cuda]"` 安装；LyCORIS
-（`lycoris-lora>=4.1.2`）随包安装：
+（`lycoris-lora>=4.1.3`）随包安装：
 
 ```bash
 uv venv -p 3.12

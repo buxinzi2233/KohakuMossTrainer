@@ -20,6 +20,7 @@ from torch import Tensor, nn
 
 from kohakumoss.offload.accel import streamed
 from kohakumoss.offload.encoders.placement import HostCopies
+from kohakumoss.offload.weights.deferred import Deferred
 from kohakumoss.offload.weights.layers import (
     LayerStreamer,
     device_dtype,
@@ -35,8 +36,10 @@ from kohakumoss.quant.embedding import QuantEmbedding, dense_lookup
 from kohakumoss.quant.source import SourceWeights
 from kohakumoss.quant.text import quantize_text_linears
 from kohakumoss.quant.w4a8 import W4A8Weight
+from kohakumoss.quant.weights import QuantWeight
 from kohakumoss.types.plans import TextEncoderPlan
 from kohakumoss_common.calls import nothing
+from kohakumoss_kernels.hardware.host_gemm import host_gemm
 
 
 class TextPlacement:
@@ -53,12 +56,14 @@ class TextPlacement:
         pinned: bool = True,
         host: str = "copy",
         dtypes: Mapping[int, torch.dtype] | None = None,
+        deferred: Mapping[int, Deferred] | None = None,
     ):
         self.model = model
         self.layers = list(layers)
         self.embedding = embedding
         self.emb_ids = frozenset() if embedding is None else tensor_ids([embedding])
         self.dtypes = dict(dtypes or {})
+        self.deferred = dict(deferred or {})
         self.lookup = host_lookup(embedding, self.dtypes)
         self.device = torch.device(device)
         self.pinned = pinned and streamed(self.device)
@@ -70,7 +75,8 @@ class TextPlacement:
 
     def to_device(self, t: Tensor) -> None:
         """Point `t` at its copy on the compute device, in its compute dtype."""
-        t.data = t.data.to(self.device, device_dtype(t, self.dtypes))
+        src = self.deferred.get(id(t), t.data)
+        t.data = src.to(self.device, device_dtype(t, self.dtypes))
 
     def place(self) -> None:
         for t in module_tensors(self.model).values():
@@ -102,16 +108,95 @@ class TextPlacement:
             t.data = torch.empty(0, dtype=t.dtype)
         self.layers = []
         self.lookup = None
+        self.deferred = {}
+
+
+class _HostLayers:
+    """A host pass's per-layer enter / leave: the layer's tensors into the cast ring
+    (`streamer`, None when none is needed), then the dense weights of its quantized
+    bases built in `dtype` (`QuantWeight.build_dense`), dropped on leave."""
+
+    def __init__(self, streamer, bases: list[list[QuantWeight]], dtype: torch.dtype):
+        self.streamer = streamer
+        self.bases = bases
+        self.dtype = dtype
+
+    def enter(self, i: int) -> None:
+        if self.streamer is not None:
+            self.streamer.enter(i)
+        for base in self.bases[i]:
+            base.build_dense(self.dtype)
+
+    def leave(self, i: int) -> None:
+        for base in self.bases[i]:
+            base.drop_dense()
+        if self.streamer is not None:
+            self.streamer.leave(i)
 
 
 class HostPlacement(TextPlacement):
-    """Everything on the host; the encoder runs there (a tensor already on the host in
-    its compute dtype is used as it is)."""
+    """Everything on the host; the encoder runs there, each pass under `host_gemm` of
+    its compute dtype. A tensor already in its compute dtype is used as it is; decoder
+    layers whose host form holds another dtype (file pages of a bf16 checkpoint run in
+    fp16) are cast per pass through a host ring of `slots` copies per layer signature,
+    the small rest once; a decoder layer's quantized bases get their dense weights for
+    the layer's turn in the pass (`_HostLayers`); the embedding table stays as loaded
+    (rows cast at lookup)."""
 
     name = "cpu"
 
-    def __init__(self, model, layers, embedding, device="cpu", pinned=False, **kw):
+    def __init__(
+        self, model, layers, embedding, device="cpu", pinned=False, slots=2, **kw
+    ):
+        self.slots = max(int(slots), 2)
         super().__init__(model, layers, embedding, "cpu", False, **kw)
+
+    def place(self) -> None:
+        inside = tensor_ids(self.layers)
+        cast = any(i in self.dtypes for i in inside)
+        self.streamer = None
+        if cast:
+            self.streamer = LayerStreamer(
+                self.layers,
+                self.device,
+                slots=self.slots,
+                pinned=False,
+                host="file",
+                dtypes=self.dtypes,
+            )
+        for t in module_tensors(self.model).values():
+            if id(t) in self.emb_ids or (cast and id(t) in inside):
+                continue
+            self.to_device(t)
+        dtype = self.model.norm.weight.dtype
+        bases = [
+            [m for m in layer.modules() if isinstance(m, QuantWeight)]
+            for layer in self.layers
+        ]
+        if cast or any(bases):
+            turns = _HostLayers(self.streamer, bases, dtype)
+            n = len(self.layers)
+            self.enter = [partial(turns.enter, i) for i in range(n)]
+            self.leave = [partial(turns.leave, i) for i in range(n)]
+        self.gemm = host_gemm(dtype)
+
+    def embed(self, ids: Tensor) -> Tensor:
+        return self.lookup(ids, self.device)
+
+    def begin(self) -> None:
+        if self.streamer is not None:
+            self.streamer.open()
+        self.gemm.__enter__()
+
+    def end(self) -> None:
+        self.gemm.__exit__(None, None, None)
+        if self.streamer is not None:
+            self.streamer.close()
+
+    def release(self) -> None:
+        if self.streamer is not None:
+            self.streamer.remove()
+        super().release()
 
 
 class OffloadPlacement(TextPlacement):
@@ -123,7 +208,7 @@ class OffloadPlacement(TextPlacement):
         tensors = list(module_tensors(self.model).values())
         moved = [t for t in tensors if id(t) not in self.emb_ids]
         self.copies = HostCopies(
-            moved, self.device, self.pinned, self.host, self.dtypes
+            moved, self.device, self.pinned, self.host, self.dtypes, self.deferred
         )
 
     def embed(self, ids: Tensor) -> Tensor:
@@ -169,6 +254,7 @@ class RingPlacement(TextPlacement):
             pinned=self.pinned,
             host=self.host,
             dtypes=self.dtypes,
+            deferred=self.deferred,
         )
         n = len(self.layers)
         self.enter = [partial(self.streamer.enter, i) for i in range(n)]
@@ -296,10 +382,11 @@ def place_text(
     compute_dtype: torch.dtype,
     host: str = "copy",
     dtypes: Mapping[int, torch.dtype] | None = None,
+    deferred: Mapping[int, Deferred] | None = None,
 ) -> TextPlacement:
     """Place a (quantized) text model under `plan.memory` (resolved) with the host form
-    `host` of its host-held weights, and bind its quantized GEMMs to the compute
-    device."""
+    `host` of its host-held weights (`deferred`: the tensors built on the device from
+    a stored base), and bind its quantized GEMMs to the compute device."""
     layers = list(getattr(text_model, "layers", []))
     embedding = getattr(text_model, "embed_tokens", None)
     kw = {"slots": plan.stream_resident} if plan.memory == "ring" else {}
@@ -311,6 +398,7 @@ def place_text(
         plan.pinned,
         host=host,
         dtypes=dtypes,
+        deferred=deferred,
         **kw,
     )
     rebind_quant(text_model, placement.device, compute_dtype, autograd=False)

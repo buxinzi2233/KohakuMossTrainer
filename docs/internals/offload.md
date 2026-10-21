@@ -115,18 +115,27 @@ RTX 5090, LoRA, online VAE and text encode, 1 MP, 6 steps
 Unpaced, 2.79 GiB of `minimal`'s reserved peak are block inputs whose free waits for
 their device-to-host copy.
 
-Host buffers come from a pool of pinned byte buffers in power-of-two size classes (at
-least 1 MiB). A packet takes the smallest free class that holds it, so a smaller bucket
-shape reuses a larger buffer. A buffer returns to the pool when its H2D copy is queued,
-and it is reused only after that copy has finished. The fetched device copy stays with
-its packet until the packet is freed, so a saved tensor that backward reads more often
-than it was saved never re-reads a recycled host buffer. The kept (never offloaded)
-storages are rebuilt from the live tensors after the build (`exclude_params` ->
-`rebuild`), so an address freed by a parameter dtype change never stays kept. New pinned memory is allocated only
-when a packet is larger than every free buffer. A pinned allocation (`cudaHostAlloc`)
-blocks the host for about 10-30 ms per 8-32 MiB buffer on the V100 host, and 42 of them
-per step cost more than the step's compute. With the pool, the LoRA `balanced` step on
-V100 with offload takes 1207 ms against 1199 ms without it.
+### Activation host slab
+
+Host buffers are cut from a `HostSlab` (`offload/host/slab.py`): in order, 512-byte
+aligned, from exact-size page-locked chunks (one `HostArena` each). Every packet of a
+micro-batch is handed back by the end of its backward (its H2D copy queued, or by
+`reset()` after the step for one backward never read), so when none is out the next
+packet starts over at the first chunk; the D2H stream, which writes the buffers, first
+waits on the events of every copy handed back, so a buffer is overwritten only after
+the device has read it, with no host wait. A micro-batch that outgrows the chunks
+takes a new one; at the next rewind they are replaced by one chunk of the bytes cut,
+rounded up to 64 MiB (after a device synchronize), so the slab holds one micro-batch's
+packets at their own sizes and allocates only when a micro-batch needs more than any
+before it. The fetched device copy stays with its packet until the packet is freed, so
+a saved tensor that backward reads more often than it was saved never re-reads a
+recycled host buffer. The kept (never offloaded) storages are rebuilt from the live
+tensors after the build (`exclude_params` -> `rebuild`), so an address freed by a
+parameter dtype change never stays kept. A pinned allocation blocks the host for about
+10-30 ms per 8-32 MiB on the V100 host, and 42 of them per step cost more than the
+step's compute, so chunks are kept across steps. The `12g` LoRA layer at 6144 tokens
+(2080 Ti) holds one 1.37 GiB chunk, and the trainer's private memory stays flat (8.1
+GiB) from the first steps to the 80th at varying token counts.
 
 ## Weight streaming
 
@@ -164,7 +173,9 @@ The device-dependent calls (`copier.copy` / `wait` / `mark_free`,
 share one `stats` dict (loads, H2D / D2H bytes, host syncs).
 
 - **Frozen bases (`ring`)**: host -> device only; quantized bases stream `q` and `scale`
-  and dequantize on use.
+  and dequantize on use. Every block's host parts sit in one HostArena (`host_arena`,
+  [below](#host-arena)), each linear's base re-pointed at its views while the arena
+  fills, so the host sources are freed as it goes.
 - **Trainable blocks (`swap`)**: fp32 masters on the host are the parameters. Before
   the last micro-batch, each weight gradient goes device -> pinned host and is summed in
   fp32 on a host worker thread (`HostAccumulator`), off the autograd thread. On the last
@@ -194,6 +205,43 @@ share one `stats` dict (loads, H2D / D2H bytes, host syncs).
   refilling a set the host waits only for the H2D that last read it, two block loads
   back, so the host memcpy of block `i+1` overlaps the H2D of block `i`; a trainable
   ring also waits for the block's master write-back.
+
+### Host arena
+
+A pinned allocation per tensor holds the next power of two of its bytes (the caching
+host allocator's size classes): the int8 DiT base's 262 block linears (4.64 GiB of
+codes) take 6.84 GiB that way. `HostArena` (`offload/host/arena.py`) lays every
+tensor one engine keeps on the host out in one buffer, 64-byte aligned:
+
+| device | storage | bytes held |
+| --- | --- | --- |
+| CUDA | one pageable buffer, filled, then page-locked once (`cudaHostRegister`) | the aligned payload, rounded up to a page |
+| XPU (pinned, no host registration) | power-of-two pinned chunks of up to 256 MiB, packed first-fit decreasing | the chunks |
+| host, or `pinned=False` | one tensor per spec | the payload |
+
+`host_copies(tensors, pinned, device, dtypes)` fills an arena from a list of tensors,
+each re-pointed at its copy as it is made (a source nothing else holds is freed while
+the arena fills: the peak is one tensor over the arena). A refused registration (the
+driver's limit on locked memory, an already-registered range) clears the runtime's
+last error through the libcudart torch loaded, moves the views into pinned chunks
+(every view handed out and every tracked tensor follows) and logs one WARNING with the
+size. `arena_bytes(sizes, kind)` is what an arena of those sizes holds; the text
+encoder's `host="auto"` choice counts with it. The frozen weight stream, the text
+encoder's and VAE's offload copies and the encoder layer rings use it; `release()`
+(and the arena's own finalizer) unregisters the buffer. The gradient-offload sums
+(`GradOffload.arena`) and `HostStateAdamW`'s masters and moments (`arena`) sit in one
+exact-size arena each too (`host_tensors`: zeros or a copy per spec, page-locked once
+filled).
+
+### Host heap
+
+glibc serves an allocation below its mmap threshold (dynamic, up to 32 MiB) from the C
+heap, and a freed one stays resident there until trimmed: the int8 codes of the
+quantized DiT base (most of them under 32 MiB each) are 2.95 GiB of such heap once the
+frozen stream has copied them into its arena. `kohakumoss_common.hostmem.trim_heap`
+(`malloc_trim(0)`, a no-op off glibc) returns those pages: after each block the frozen
+stream copies, after `host_copies` fills an arena, and at the end of the training
+build.
 
 ## Allocator
 
@@ -400,7 +448,12 @@ jobs on one `HostWorker` thread. `HostAccumulator` copies each device gradient i
 next buffer of a ring of `STAGING_SLOTS` (4) pinned staging buffers shared by every
 parameter, each grown to the largest gradient it took, and the worker adds it into the
 fp32 sum; a buffer is reused once its add has landed, so backward waits only when the
-worker is four gradients behind. Its host staging is 4 x the largest gradient in the
+worker is four gradients behind. A 16-bit gradient goes into its fp32 sum through
+`widening_add`, which converts it into a 4M-element fp32 scratch one chunk at a time
+and adds each chunk. On the 128-core host of the 5090 runs, `dst.add_(src)` with a
+bf16 `src` and an fp32 `dst` runs at about 14 GB/s, on torch's mixed-dtype path. The
+chunked copy-then-add runs at about 140 GB/s, the speed of an fp32 add, and gives
+bitwise the same sum. Its host staging is 4 x the largest gradient in the
 gradient's dtype, independent of the parameter count: under `swap` with `GRAD_ACC > 1`
 the host holds the fp32 sums (4 B per trainable block parameter) and nothing per
 parameter beyond them. The thread holds only its queue, never its owner. It
@@ -491,12 +544,24 @@ goes through `apply_to_text_encoder(text_model, TextEncoderPlan, device, dtype)`
 | `ring` | final norm, rotary tables | + a ring of `stream_resident` slots per layer kind | all layer weights, prefetched one layer ahead |
 | `cpu` | nothing (runs on the host) | nothing | 0 |
 
+Under `cpu` a tensor whose loaded form is already in the compute dtype is used as it
+is (the bf16 file pages of a bf16 run). When the decoder layers' loaded form holds
+another dtype (the bf16 file pages of a run whose `dtype` resolves to fp16, a 2080 Ti
+or T4 run), `HostPlacement` streams them through a `LayerStreamer` on the host: two
+cast copies per layer kind, filled per pass from the file pages, so no whole fp16
+copy is held; the small rest is cast once and the embedding rows are cast at lookup.
+
 The host form of the weights `offload` / `ring` hold on the host is the plan's `host`:
 `copy` makes host copies in the compute dtype (pinned when `pinned`, one caching host
 allocator block per tensor, rounded up to a power of two); `file` keeps the
 checkpoint's file pages, copied from pageable memory and cast to the compute dtype by
 the copy (`HostCopies` / `LayerStreamer` with `dtypes`). File pages are page cache: the
-kernel reclaims them under memory pressure and reads them again on the next pass.
+kernel reclaims them under memory pressure and reads them again on the next pass. A
+weight dequantized from a stored base (a ComfyUI int8 file at `precision="compute"`)
+has a `Deferred` host form (`kohakumoss.offload.weights.deferred`): the base's codes and
+scales cross the bus and the dense weight is built on the device, into the ring slot
+or the offload copy; between passes the parameter points at a one-element host
+placeholder.
 
 ### Host room
 
@@ -547,7 +612,7 @@ places the FLUX.2 VAE for online latent encoding and for sample decodes
 | `resident` (default) | weights on the device | weights + activations |
 | `offload` | nothing (pinned host copy) | weights moved in, released after the pass |
 | `ring` (`stream` is accepted too) | nothing | encoder / decoder blocks through 2-slot rings, the rest moved in per pass |
-| `cpu` | host | host (training: offline latent cache only, i.e. sample decodes) |
+| `cpu` | host | host (every `LATENT_CACHE` mode) |
 | `auto` | the fastest of resident / offload / ring that fits next to the DiT step reserve | |
 
 `offload` copies the weights in from their pinned host copies on the compute stream at
@@ -563,7 +628,9 @@ the latents until the batcher takes them, so an offloaded VAE moves once per `ah
 batches and is released before the DiT step. `VaeEncodeStats` logs `vae_time`,
 `vae_share`, `vae_images` and `vae_h2d_gb` per step; the VRAM timeline marks the VAE
 pass (`vram_vae_peak`, `vram_vae_after`) apart from the DiT step. The `8g` and `12g`
-VRAM layers offload the VAE, `auto` picks.
+VRAM layers offload the VAE, `auto` picks. `memory="cpu"` runs encode and decode on the
+host with every `LATENT_CACHE` mode; online, one INFO line gives the first pass's
+seconds and the cost per step.
 
 ### VAE dtype, compile and batching
 
@@ -571,8 +638,14 @@ VRAM layers offload the VAE, `auto` picks.
 `kohakumoss.encoders.vae.resolve_vae_dtype`) selects the VAE's weight and compute dtype.
 It is `auto` | `bf16` | `fp16` | `fp32`.
 
-- `auto` is bf16 where the card has bf16 and fp16 elsewhere (V100, 2080 Ti); on the CPU it
-  is fp32.
+- `auto` is bf16 where the card has bf16 and fp16 elsewhere (V100, 2080 Ti), resolved
+  for the device the run computes on (`DEVICE`, the training device, the cache
+  factory's `device`), not where the VAE is placed: a host VAE (`memory="cpu"`) of a
+  2080 Ti run computes in fp16, so the latent cache key is the same whichever pass
+  encodes. A run on the host alone, or a cache pass whose CUDA `device` this process
+  cannot query, takes bf16. Host GEMMs in either dtype run through `HostGemm` where
+  the host has no native 16-bit GEMMs ([text-encoder.md](text-encoder.md#host-gemm));
+  an explicit `fp32` stays fp32.
 - One dtype covers every path: the online latent encode and the sample decode in
   training (both `PlacedVae`), the offline cache pass (`vae_encoder`) and the pipeline
   decode (`MossPipeline.from_pretrained(vae_dtype=...)`). Latents always come out in

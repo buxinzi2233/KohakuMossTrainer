@@ -51,7 +51,7 @@ from kohakumoss.quant.source import SourceWeights
 from kohakumoss.quant.stored_text import read_text_record
 from kohakumoss.quant.text import GroupQuantLinear
 from kohakumoss.types.plans import TextEncoderPlan
-from kohakumoss.weights import TEXT, comfy_file, is_comfy_folder
+from kohakumoss.weights import TEXT, comfy_file, hf_root, is_comfy_folder
 from kohakumoss_common.calls import nothing
 from kohakumoss_kernels.dtypes import short
 from kohakumoss_kernels.hardware.current import synchronize
@@ -85,9 +85,9 @@ def default_auto_memory(
 ) -> str:
     """The fastest placement whose footprint fits the device's free memory (minus
     `reserve` bytes kept for the caller's own peak) once the load adds `extra_layers`
-    bytes to the decoder layers; the host has no limit."""
+    bytes to the decoder layers; 'cpu' on the host."""
     if device.type == "cpu":
-        return "resident"
+        return "cpu"
     sizes = text_sizes(text, plan.stream_resident, extra_layers)
     budget = int(device_budget(device))
     tokens = plan.max_tokens or 16384
@@ -109,11 +109,12 @@ def _stored(model_dir: Path, plan: TextEncoderPlan):
 
 def text_source_of(path: str | Path) -> Path:
     """The text-encoder weights `path` names: a ComfyUI folder's default text-encoder
-    file, else `path` (a ComfyUI file, a pipeline root or a model dir)."""
+    file, an HF weights root's `base/` pipeline (`hf_root`), else `path` (a ComfyUI
+    file, a pipeline root or a model dir)."""
     if not str(path):
         return Path(path)
     path = Path(path)
-    return comfy_file(path, TEXT) if is_comfy_folder(path) else path
+    return comfy_file(path, TEXT) if is_comfy_folder(path) else hf_root(path, TEXT)
 
 
 def stored_text_format(path: str | Path, plan: TextEncoderPlan) -> tuple[str, str]:
@@ -131,13 +132,17 @@ def stored_text_format(path: str | Path, plan: TextEncoderPlan) -> tuple[str, st
 
 
 def resolve_text_plan(
-    path: str | Path, plan: TextEncoderPlan, device: torch.device | str
+    path: str | Path,
+    plan: TextEncoderPlan,
+    device: torch.device | str,
+    run_device: torch.device | str | None = None,
 ) -> tuple[TextEncoderPlan, str, str]:
-    """(plan with dtype and precision resolved for `device`, the stored precision,
-    the stored layout) of the text encoder at `path`."""
+    """(plan with precision resolved for `device`, where the encoder computes, and
+    dtype for `run_device` (default `device`), the device its embeddings are for, and
+    `device`; the stored precision; the stored layout) of the text encoder at `path`."""
     stored, layout = stored_text_format(path, plan)
     plan = resolve_precision(plan, stored, device)
-    return resolve_dtype(plan, device), stored, layout
+    return resolve_dtype(plan, run_device or device, device), stored, layout
 
 
 def default_w4a8(
@@ -266,6 +271,7 @@ class QwenTextEncoder:
         output_device: torch.device | str | None = None,
         auto_memory: Callable | None = None,
         auto_w4a8: Callable | None = None,
+        run_device: torch.device | str | None = None,
     ) -> "QwenTextEncoder":
         """`path` is a pipeline root (text_encoder/ + tokenizer/), a model dir (its own
         tokenizer files, else a sibling tokenizer/), a ComfyUI text-encoder file (the
@@ -276,11 +282,12 @@ class QwenTextEncoder:
         stored values) straight to each tensor's placed home (`load_placed_text`);
         `auto_memory(text_model, device, extra_layers=...) -> memory mode` resolves
         `memory="auto"` (default: the fastest placement that fits the free memory),
-        `auto_w4a8(text_model, device)` a W4A8 file's `w4a8="auto"`."""
+        `auto_w4a8(text_model, device)` a W4A8 file's `w4a8="auto"`; `dtype="auto"`
+        resolves for `run_device` (default `device`), whatever the placement."""
         path = text_source_of(path)
         plan = text_plan(plan)
         on = torch.device("cpu") if plan.memory == "cpu" else torch.device(device)
-        plan, stored, layout = resolve_text_plan(path, plan, on)
+        plan, stored, layout = resolve_text_plan(path, plan, on, run_device or device)
         plan = check_plan(plan, device=on)
         dtype = DTYPES[plan.dtype]
         if is_comfy_text_file(path):

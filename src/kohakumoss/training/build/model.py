@@ -20,7 +20,7 @@ from kohakumoss.encoders.text.plan import DTYPES as TEXT_DTYPES
 from kohakumoss.encoders.text.plan import MEMORY_ALIASES as TEXT_MEMORY_ALIASES
 from kohakumoss.encoders.vae import FluxVae, resolve_vae_dtype
 from kohakumoss.logging.log import get_logger, hl
-from kohakumoss.memory.apply import apply_to_backbone
+from kohakumoss.memory.apply import apply_to_backbone, quantized_weights
 from kohakumoss.memory.estimate import Workload, estimate
 from kohakumoss.memory.planner import NothingFits, auto_plan
 from kohakumoss.memory.profiles import ORDER, catalog_name
@@ -50,6 +50,7 @@ from kohakumoss.training.optim.optimizers.factory import STATE_BYTES
 from kohakumoss.training.weights import component, stored_dit_precision
 from kohakumoss.types.plans import PrecisionConfig
 from kohakumoss.weights import DIT, TEXT, VAE
+from kohakumoss_common.hostmem import trim_heap
 from kohakumoss_kernels.hardware.current import rng_kept
 
 log = get_logger(__name__)
@@ -66,8 +67,10 @@ class Built:
     sample_embeds: list | None = None
 
 
-def build_backbone(k: dict, device: torch.device, prec: PrecisionConfig):
-    """The backbone loaded from WEIGHTS (TRANSFORMER: the ComfyUI folder's file)."""
+def build_backbone(k: dict, device: torch.device, prec: PrecisionConfig, defer=None):
+    """The backbone loaded from WEIGHTS (TRANSFORMER: the ComfyUI folder's file); the
+    weights `defer(meta model)` names stay unread for the quantizer
+    (`load_backbone`)."""
     cfg = resolve_config(k["VARIANT"], k["ARCH_OVERRIDES"] or None)
     model, _ = load_backbone(
         component(k, DIT),
@@ -76,6 +79,7 @@ def build_backbone(k: dict, device: torch.device, prec: PrecisionConfig):
         keep_fp32=prec.keep_fp32,
         cfg=cfg,
         kernels=k["KERNELS"],
+        defer=defer,
     )
     return model
 
@@ -106,6 +110,7 @@ def workload(
         world=world,
         sharded=k["PARALLEL"] == "fsdp",
         sharded_grads=fsdp_grads_sharded(k),
+        gathered=k["FSDP_RESHARD"] == "backward",
         ema_decays=decay_count(k["EMA"]),
         optim_state_bytes=STATE_BYTES.get(k["OPTIMIZER"], STATE_BYTES["adamw"]),
         master_bytes=compute_bytes if k["OPTIMIZER"] == "adamw16" else 4,
@@ -237,14 +242,19 @@ def build_model(
     text_tokens: int | None = None,
 ) -> Built:
     """Build order of types/context.py up to (not including) the parallel wrap and compile:
-    load on the host -> FP16_FIX -> memory plan (quantize, place or stream onto
-    `device`, offload, runner) -> trainable -> parameter dtypes -> bind_ops -> encoders.
-    `text_tokens`: the dataset's longest caption, for the `auto` plan.
+    memory plan -> load on the host (the weights the plan quantizes left unread, read
+    from the checkpoint by the quantizer) -> FP16_FIX -> the plan applied (quantize,
+    place or stream onto `device`, offload, runner) -> trainable -> parameter dtypes
+    -> bind_ops -> encoders -> the C heap's freed pages returned. `text_tokens`: the
+    dataset's longest caption, for the `auto` plan.
     """
-    backbone = build_backbone(k, torch.device("cpu"), prec)
-    apply_fp16_fix(backbone, prec.fp16_fix, **prec.fp16_fix_kwargs)
     plan, auto_rows = resolve_memory(k, device, prec.compute, world, text_tokens)
     full = is_full(k)
+    defer = partial(
+        quantized_weights, plan=plan, trainable_base=full, keep_fp32=prec.keep_fp32
+    )
+    backbone = build_backbone(k, torch.device("cpu"), prec, defer)
+    apply_fp16_fix(backbone, prec.fp16_fix, **prec.fp16_fix_kwargs)
     engines = apply_to_backbone(
         backbone,
         plan,
@@ -261,6 +271,7 @@ def build_model(
     engines.exclude_params(trainable.trainable_params())
     backbone.bind_ops(OpSet.resolve(device, prec.compute, k["KERNELS"]))
     vae, text, embeds = build_encoders(k, device, prec, step_reserve(k, plan), plan)
+    trim_heap()
     return Built(backbone, trainable, plan, engines, vae, text, embeds)
 
 
@@ -359,11 +370,12 @@ def training_text_plan(k: dict, device: torch.device, plan=None):
 
 def data_knobs(k: dict, device: torch.device) -> dict:
     """The knobs the run's DataConfig reads: `k` plus the encoder compute specs its
-    cache keys record (VAE_DTYPE resolved on `device`; the text encoder's resolved
-    dtype, precision and quantization layout)."""
+    cache keys record (VAE_DTYPE resolved for `device`; the text encoder's dtype
+    resolved for `device`, its precision for where it computes, its quantization
+    layout), whatever the encoders' placements."""
     plan, te_device = training_text_plan(k, device)
     on = torch.device("cpu") if plan.memory == "cpu" else te_device
-    plan, _, layout = resolve_text_plan(_component_path(k, TEXT), plan, on)
+    plan, _, layout = resolve_text_plan(_component_path(k, TEXT), plan, on, device)
     vae_dtype = resolve_vae_dtype(k.get("VAE_DTYPE", "auto"), device)
     return {**k, **cache_specs(vae_dtype, plan, TEXT_DTYPES[plan.dtype], layout)}
 
@@ -416,6 +428,7 @@ def build_encoders(
             output_device=hold,
             auto_memory=choose,
             auto_w4a8=w4a8,
+            run_device=device,
         )
         rule = encoder_rule(k, "text", mem_plan)
         log.info(f"text encoder placement: {hl(text.plan.memory)} ({rule})")

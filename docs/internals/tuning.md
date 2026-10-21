@@ -158,15 +158,21 @@ key, candidates, launch)`:
 2. **Shortlist timing.** The top `shortlist` configs are timed with device events
    around plain launches (`timing="events"`): a busy warmup to boost clocks, then the
    best of ten calls, host launch cost included as the eager training loop pays it.
+   `timing="burst"` (the adapter ops' `AutotunedOp`) times a burst of back-to-back calls
+   issued while the device spins (`torch.cuda._sleep` over twice the burst's measured
+   host launch time), so every call is queued before the first starts and the burst's
+   device time per call is what is compared: a GPU-bound training step hides the host
+   launch time of an adapter op, which a single synchronised call would count.
    `timing="graph"` (CUDA-graph replay, launch cost excluded) is for benches. The tuner
-   times with events only: a capture in the training process makes CUDA calls of other
+   never captures a graph: a capture in the training process makes CUDA calls of other
    threads (the DataLoader's pin-memory thread) fail, in global and, as measured on
    Windows, thread-local capture mode alike. Every config runs under the
    [working-memory bound](#working-memory-bound).
 3. **Table.** The winner, every timing, every config's working memory (`working_mib`)
    and every failure are written to
    `<cache>/tuning/<card-sm-cuda-torch>/<tag>/<kernel>.json` (atomic replace), where
-   `<tag>` hashes the kohakumoss / triton / tilelang versions. Later processes read the
+   `<tag>` hashes the kohakumoss / lycoris-lora / triton / tilelang versions (a LyCORIS
+   release changes the adapter ops' kernel candidates). Later processes read the
    table and never time again; a stored config that is not among the current candidates
    is re-tuned.
 
@@ -310,6 +316,11 @@ implementation.
 - Under `TUNE="off"` neither measures.
 - On first use per device the kernel runs once without autograd (`_probe`), so a kernel
   that cannot build hands the op to the registry fallback before any graph is recorded.
+
+An op served by the `compile` backend takes inductor's launch config, which inductor
+benchmarks per process (several reduction splits for one generated kernel): two
+processes can round its output differently, so cross-run comparisons use the error
+statistics, never bitwise equality.
 
 ### Pipelines
 
@@ -524,6 +535,15 @@ The adapter prewarm (`AdapterSet.prewarm`) settles each distinct `AutotunedOp` o
   it, and a measured problem's free blocks go back to the driver (`release`) before the
   next, so the cached blocks of one token count never stack under the next.
 - Each problem's body candidate is timed first (`select(lean=BODY)`).
+- Before a problem is timed, the LyCORIS kernel runs once on copies of its operands
+  (forward, and backward under grad), untimed, within the tuning budget below but
+  outside the working-memory bound (`AutotunedOp._settle_tiles`). That call holds LyCORIS's cold tile tuning, whose
+  inputs, candidate outputs and split-K partials are several times the kernel's own
+  working memory: 470-880 MiB at 1024-8192 tokens for the LoKr factor-8 linears of the
+  model. Inside the timed call, that tuning passed the bound of 8 x the body's working
+  memory (at least 256 MiB). The kernel was then skipped as "over the working-memory
+  bound", and every larger bucket inherited the body. With the tiles settled first, the
+  bound and the timing see the kernel's own calls.
 - The prewarm starts and ends on an empty allocator cache and its device peak enters
   `note_peak`, so the step-1 line `VRAM peak: prewarm` and the `prewarm_peak_*` metrics
   cover it.
