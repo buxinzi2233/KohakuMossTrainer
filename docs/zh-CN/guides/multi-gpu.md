@@ -85,6 +85,8 @@ reduce-scatter：
 | `"step"`（默认） | 仅在最后一个微批次（`set_requires_gradient_sync`）；每步一次 | 整个模型未分片的梯度（fp32 主权重每个参数 4 B；内存估算包含它们） |
 | `"micro"` | 每个微批次之后；每步 `GRAD_ACC` 次 | 仅分片后的梯度 |
 
+`FSDP_RESHARD` 决定何时释放某个块 all-gather 后的完整参数：`"forward"`（默认值，ZeRO-3）在前向结束后释放，反向传播时再次收集；`"backward"`（ZeRO-2）在反向结束后才释放，每个微批次只收集一次，但在反向开始时所有块的完整参数仍驻留在显存中（内存估算会计入它们）。
+
 <a id="data-parallel-ddp"></a>
 ## 数据并行（`ddp`）
 
@@ -362,8 +364,9 @@ dtype：
   并集）、`trace_comm_exposed_ms`（没有计算内核运行时的 NCCL 时间）、
   `trace_copy_ms`、`trace_idle_ms`（没有内核或复制运行的时间），以及忙碌 /
   计算占比。
-- 流水线下，NCCL 接收内核等待对端时会自旋，因此其中的 `trace_comm_ms`
-  包含等待；`1 - trace_compute_frac` 就是气泡占比。
+- `trace_phase_<p>_ms`：对 `data`、`forward`、`backward`、`recompute`、`optimizer`、`other` 等阶段，统计该阶段内启动的计算内核执行时间的并集。驱动会对每个微批次的主机到设备传输（`data`）、前向和反向以及优化器步骤设置 profiler 范围；每次检查点重计算均放入 `recompute` 范围（`kohakumoss.logging.phases`）。内核按其启动时所在宿主线程中最内层打开的范围归类；因此 autograd 线程的内核算入 `backward`，反向过程内部的重新计算算入 `recompute`。未处于任何范围的内核归为 `other`。
+- `<output>/ranks/trace.rank<r>.kernels.json`：列出各阶段设备执行时间最长的 40 个内核，以及每步的毫秒数和调用次数。
+- 流水线下，NCCL 接收内核等待对端时会自旋，因此其中的 `trace_comm_ms` 包含等待；`1 - trace_compute_frac` 表示流水线气泡占比。DDP 下相同的自旋则统计等待最慢 rank 的时间。
 
 `TRACE_STEPS` 中的步骤运行较慢（CUPTI 跟踪）。任一窗口中的步骤都会从
 稳态摘要中排除。

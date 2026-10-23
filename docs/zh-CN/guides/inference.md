@@ -218,9 +218,7 @@ out.images[0].save("cat.png")
   提示词）；见 [text-encoder.md](../internals/text-encoder.md)。
 - 用户指定的放置方式会按原样使用。一次调用的分阶段内存见
   [sampling-memory.md](../internals/sampling-memory.md)。
-- **文本设备**：`text_device="cpu"`（`TEXT_DEVICE = "cpu"`）在 CPU 上运行文本
-  编码器，仅将嵌入移到计算设备。此时 9B 编码器在 bf16 下需要约 ~18 GB
-  主机内存，不占显存；编码速度取决于 CPU。训练仅在离线缓存阶段使用 CPU。
+- **文本设备**：`text_device="cpu"`（`TEXT_DEVICE = "cpu"`）在 CPU 上运行文本编码器，仅将生成的嵌入移动到计算设备。此时 9B 编码器可直接读取 bf16 检查点对应的文件页（已存储为 int8 / W4A8 的文件也按存储格式执行），不占用 GPU 显存；编码速度取决于 CPU。训练同样支持 CPU 编码，且适用于**所有** `TEXT_CACHE` 模式。
 
 <a id="vae-placement"></a>
 ### VAE 放置

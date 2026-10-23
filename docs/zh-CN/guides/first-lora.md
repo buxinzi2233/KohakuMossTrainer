@@ -105,6 +105,8 @@ Windows 上先激活 venv，再在 PowerShell 或 `cmd` 中使用相同命令：
 | 两个 GPU（Linux） | `recipes_lora_ddp.py` |
 | 四个 RTX 5090（Linux） | `recipes_lora_ddp_4x5090.py` |
 
+- 追求最高速度的 LoKr factor 8：单张 RTX 5090 使用 `recipes_lokr_5090.py`；四张 RTX 5090（Linux）使用 `recipes_lokr_ddp_4x5090.py`。
+- RTX 5090 配方每次优化器更新处理 294,912 个 token（通过 `GRAD_ACC` 与多张 GPU 合计，相当于 64 个 4608-token 微批次）。
 - 24 GB bf16 显卡上的其他算法：`recipes_lycoris_loha.py`、`recipes_lycoris_lokr.py`、`recipes_lycoris_oft.py`、`recipes_dora.py`（每个都组合 `vram_24g` 和 `precision_bf16`）。
 - 对于其他任何显卡或精度，使用 `kohakumoss-config new train --algo loha | lokr |
   oft | dora`。

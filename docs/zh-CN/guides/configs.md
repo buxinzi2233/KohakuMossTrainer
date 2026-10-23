@@ -135,10 +135,10 @@ kohakumoss-config wizard
 | 部分 | 何时 | GiB |
 | --- | --- | --- |
 | 训练器进程及其 `NUM_WORKERS` 个加载器工作进程（Windows 上为生成的进程，每个都导入 torch） | 始终 | 基准矩阵为每次运行预留 8（`kohakumoss_bench/plan/hostmem.py`） |
-| DiT，在放置之前加载到主机 | 构建时 | 9.47 |
+| DiT：先在主机上构建并随后放置；如果基础模型是量化格式（`int8` / `fp8`），块级线性层的权重无需先读入主机，而是直接从文件中量化/读取 | 构建时 | 16 位格式为 9.47；int8 基础模型约为 4.8（包含量化编码与其余 16 位部分） |
 | 文本编码器，从其文件页流式传输到放置位置（[流式加载](../internals/text-encoder.md#streamed-load)） | 当 `SAMPLE_EVERY > 0` 或 `TEXT_CACHE` 不是 `offline` 时；使用离线文本缓存时，在处理完采样提示词后释放 | 仅对 `ring` / `offload` 复制到主机的部分私有（`host` 为 `copy`：bf16 / fp16 下 15.63，使用锁页内存时按张量向上取整；`host` 为 `file`：无，文件页即页缓存），以及加载时量化并保留在主机上的层 |
 | 流式传输的 DiT 块，使用锁页内存（共 42 个块，每块 0.21；设备保留 `stream_resident` 个块） | 流式传输配置档 | 约 5.5（`balanced`）至 8.4（两个常驻块） |
-| 卸载的激活值（块输入，每块一份，使用向上取整到 2 的幂的锁页缓冲区） | `act_offload` | 4352 个 token 时约 1，8192 时约 2 |
+| 卸载的激活（每个块的输入，通过一个锁页主机 Slab 按实际大小切分保存） | `act_offload` | 每微批次 6144 token 时约 1.4 GiB，随 token 数近似成比例变化 |
 | 适配器主副本、矩估计和梯度累加和（每个可训练参数 16 字节） | `optim_state` 为 `stream` / `cpu`，`grad_offload` | `attn-mlp` 上 LoRA DIM 32（74 M 参数）约 1.1 |
 
 各层合计：
@@ -147,6 +147,7 @@ kohakumoss-config wizard
 | --- | --- | --- |
 | `8g` | 接近 32 GiB（进程、流式传输块和文本编码器） | 约 19 GiB |
 | `24g`（`balanced`） | 接近 29 GiB | 约 14 GiB |
+| `12g`，`BASE_PRECISION = "int8"`、fp16、两个缓存均离线、每 5 步采样一次（2080 Ti；测量进程树的私有内存） | 5.9 GiB | 9.2 GiB：训练器 8.4 GiB（int8 块 4.44、激活 Slab 1.37、适配器状态与累加 1.11、C 堆 0.80），编译工作进程 0.44 GiB（每个核心一个：64 线程主机上 33 个），加载工作进程 0.36 GiB |
 
 设置 `SAMPLE_EVERY = 0` 且两个缓存均为离线时，只读取缓存，文本编码器留在磁盘上。全量微调见 [full-finetune.md](full-finetune.md#host-ram)。
 

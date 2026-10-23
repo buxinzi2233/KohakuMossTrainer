@@ -154,7 +154,7 @@ kohakumoss-tune --dtype fp16 --sizes 1024x1024 --backward   # training shapes
    种子 tile 排在排序结果之前（[kernel-dev.md](kernel-dev.md#measured-design-per-arch)）。
 2. **候选列表计时。** 前 `shortlist` 个配置在普通启动周围用设备事件计时
    （`timing="events"`）：先进行繁忙预热以提升频率，然后取十次调用中的最佳值，并将主机
-   启动成本计入，因为 eager 训练循环需要承担它。`timing="graph"`（CUDA 图重放，不含启动
+   启动成本计入，因为 eager 训练循环需要承担它。`timing="burst"`（适配器算子的 `AutotunedOp`）则会在设备以 `torch.cuda._sleep` 自旋时连续提交一组调用，自旋时间为所测得主机提交耗时的两倍，确保所有调用在第一项开始之前已经入队。它比较的是整组调用折算到每次的设备执行时间：GPU 计算受限的训练步骤通常能隐藏适配器算子的主机启动开销，而单次同步计时会把这部分也算进去。`timing="graph"`（CUDA 图重放，不含启动
    成本）用于基准测试。调优器只用事件计时：在训练进程中进行捕获会让其他线程（DataLoader
    的 pin-memory 线程）的 CUDA 调用失败，全局捕获模式和（在 Windows 上实测）线程局部
    捕获模式都是如此。每个配置都在[工作显存上限](#working-memory-bound)下运行。
@@ -473,6 +473,7 @@ reserved GiB | bound`，带总计行，然后一行
   梯度模式一个构建器），随后丢弃；已测量问题的空闲块在下一个问题前归还驱动（`release`），
   因此一个词元数的缓存块不会堆叠到下一个之下。
 - 每个问题的主体候选首先计时（`select(lean=BODY)`）。
+- 在问题计时前，LyCORIS 内核先在输入副本上无计时运行一次（有梯度时包含反向），该过程计入下述调优预算，但不计入工作显存上限（`AutotunedOp._settle_tiles`）。这一步负责消化 LyCORIS 的冷启动 tile 调优，其输入、候选输出和 split-K 部分结果占用的显存可能是内核自身工作区的数倍：模型中 LoKr factor 8 的线性层在 1024～8192 token 时需要约 470～880 MiB。如果把这次冷启动调优放在正式计时内，会超过主体候选工作显存的 8 倍上限（至少 256 MiB），导致内核被误判为“超过工作显存上限”，后续所有更大 token 桶都只继承主体实现。先稳定 tile 选择后，内存限制与计时才会考察内核本身的正常运行。
 - 预热从空分配器缓存开始并在其结束，其设备峰值进入 `note_peak`，因此第 1 步的
   `VRAM peak: prewarm` 行和 `prewarm_peak_*` 指标覆盖它。
 

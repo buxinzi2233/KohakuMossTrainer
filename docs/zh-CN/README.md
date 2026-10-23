@@ -3,6 +3,8 @@
 <a id="kohakumoss-docs"></a>
 # KohakuMoss 文档
 
+快速入口：[安装](guides/install.md) · [第一个 LoRA](guides/first-lora.md) · [配置与预设](guides/configs.md) · [RTX 5090 训练基准](performance/training-5090.md)
+
 | 章节 | 内容 |
 | --- | --- |
 | [guides/](guides/README.md) | 安装（Windows / Linux / Intel Arc / Colab）、配置与预设、主机 RAM、数据集与缓存、第一个 LoRA、全量微调、推理与对比网格、导出到 ComfyUI、日志、多 GPU、脚本目录 |

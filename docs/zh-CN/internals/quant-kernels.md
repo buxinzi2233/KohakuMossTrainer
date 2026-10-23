@@ -42,6 +42,7 @@
 - 只有当它们能精确舍入到活动权重时才替换它（`(stored * fold).to(live.dtype) == live`）。
   否则量化的是活动权重：合并进其中的 delta、另一个检查点、未从文件加载的模型。
 - 以活动 dtype 存储、且自加载以来没有折叠的权重不会被再次读取（活动副本本身就是其存储数值）。
+- 训练构建会在加载之前解析内存计划：计划中需要量化的权重（`kohakumoss.memory.apply.quantized_weights`，选择规则与 `quantize_model` 相同）会留在 meta 设备上，不提前读取（`load_backbone(defer=...)`、`model.deferred_weights`），从而避免在主机中生成块级线性层的 16 位副本。量化器按需从检查点读取每个权重（`deferred_weight`：存储值乘以加载以来的折叠因子；若存储 dtype 与计算 dtype 相同且无折叠，则直接使用存储张量），与上述已验证来源的规则一致。构建结束时如果仍有任何延迟权重未被量化器访问，则抛出 ValueError。对 MOSS-Image 的 int8 基础模型、fp16 计算而言，构建时主机私有内存峰值为 5.7 GiB（包含量化编码及其余 16 位部分）；263 组量化基础权重的代码与缩放系数按 SHA-256 计算的摘要，与先加载 16 位权重副本、再执行量化所得到的结果完全一致。
 - 该查找对每个权重只运行一次，在模型被量化时（加载 / 内存计划 / 导出），绝不在每步运行。
   每个量化器对每个模型记录一行 INFO：
   `base fp8: quantized <n> linears: from the stored values <n>`（DiT）或
@@ -242,7 +243,7 @@ RTX 2080 Ti 和 RTX 3090 上实测比 eager 慢（2080 Ti 上 [4096, 3072] 为 0
 两者给出相同的 int8 数值，因此输出也相同。文本编码器通过 `TEXT_ENCODE["w4a8"]`
 在二者之间选择（[text-encoder.md](text-encoder.md)）；流式传输的 DiT 基础权重在进入
 环形缓冲区之前被解码为 int8。带 `correction` 的层没有 int8 形式，会运行其稠密权重。
-开销见 [quant-rotate.md](../performance/quant-rotate.md#w4a8-decode)。
+开销见 [quant-rotate.md](../performance/quant-rotate.md)。
 
 <a id="embedding"></a>
 ### 嵌入

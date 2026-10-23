@@ -3,6 +3,10 @@
 <a id="kohakumoss"></a>
 # KohakuMoss
 
+[中文文档](docs/zh-CN/README.md) · [安装指南](docs/zh-CN/guides/install.md) · [第一个 LoRA](docs/zh-CN/guides/first-lora.md) · [RTX 5090 训练基准](docs/zh-CN/performance/training-5090.md)
+
+本仓库提供 KohakuMossTrainer 的简体中文文档。中文修订以英文原文为准，涵盖训练配置、显存卸载、文本编码器与多 GPU 训练；原项目见 [KohakuBlueleaf/KohakuMossTrainer](https://github.com/KohakuBlueleaf/KohakuMossTrainer)。
+
 一个 [MOSS-Image](https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base)
 （MOSS-Image-Base / -SFT）微调框架：支持全部 LyCORIS 算法，以及在原生分辨率下对文本-图像数据
 进行全量微调，并提供推理；可在 Windows 和 Linux 上运行，从 6 GB 显卡到多 GPU 节点。
