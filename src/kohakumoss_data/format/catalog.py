@@ -4,25 +4,52 @@ file of another layout by a rescan; a prebuilt one (a moss_shard dataset's catal
 is an error naming the import command (REIMPORT)."""
 
 import os
+import time
 from collections.abc import Iterable
 
 from kohakumoss_data.catalog.table import Catalog, open_catalog
 from kohakumoss_data.catalog.vault import NO_STAMP, CatalogVault, is_catalog_vault
 from kohakumoss_data.types import CatalogRow
 
-__all__ = ["REIMPORT", "Catalog", "read_catalog", "remove_vault", "write_catalog"]
+__all__ = [
+    "REIMPORT",
+    "Catalog",
+    "read_catalog",
+    "remove_file",
+    "remove_vault",
+    "write_catalog",
+]
 CHUNK = 4096
+REMOVE_TRIES = 5
+REMOVE_WAIT_S = 0.05
 REIMPORT = (
     "import the source again with scripts/data/catalog_build.py (import_to in its "
     "dataset entry)"
 )
 
 
+def remove_file(path: str) -> None:
+    """`os.remove(path)`, retried while another process holds the file open (Windows
+    raises PermissionError where POSIX unlinks anyway: an extra attempt changes nothing
+    there); the last failure is a PermissionError naming the file."""
+    for attempt in range(REMOVE_TRIES):
+        try:
+            os.remove(path)
+            return
+        except PermissionError as err:
+            if attempt == REMOVE_TRIES - 1:
+                raise PermissionError(
+                    f"{path}: still open in another process, cannot delete it"
+                ) from err
+            time.sleep(REMOVE_WAIT_S * 2**attempt)
+
+
 def remove_vault(path: str) -> None:
-    """Delete a vault file and its SQLite sidecars."""
+    """Delete a vault file and its SQLite sidecars (`remove_file`: a reader holding one
+    open is retried, then reported with its name)."""
     for suffix in ("", "-wal", "-shm"):
         if os.path.exists(path + suffix):
-            os.remove(path + suffix)
+            remove_file(path + suffix)
 
 
 def write_catalog(path: str, rows: Iterable[CatalogRow]) -> int:

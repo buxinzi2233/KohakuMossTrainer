@@ -44,6 +44,14 @@ column.
   (`kogine`) script: settings are module-level knobs, configs compose preset layers, and
   `kohakumoss-config` writes a checked config for your GPU and dataset.
 
+<a id="release-1-0"></a>
+## Version 1.0
+
+This is version 1.0. Windows support is **not fully tested yet**: the toolchain detection, encoding,
+process and file-system semantics fixes are in, but the full training and multi-GPU flows have not
+been run end to end on real Windows hardware, so issues describing your setup are very welcome.
+Issues and pull requests are welcome; please include your OS, GPU, CUDA version and logs.
+
 ## Install
 
 torch comes from the PyTorch index that matches your GPU and driver; the install helper

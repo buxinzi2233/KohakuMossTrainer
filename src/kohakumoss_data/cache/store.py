@@ -14,6 +14,10 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from kohakumoss_common.log import get_logger
+from kohakumoss_data.format.catalog import remove_file
+
+log = get_logger(__name__)
 MAGIC = b"KMT1"
 HEAD = struct.Struct("<4sBBHf")
 STORAGE = {
@@ -284,8 +288,9 @@ class TensorStore:
 
 def merge_shards(path: str) -> int:
     """Fold every shard next to `path` into the main file (keys the main file lacks),
-    rewrite its length index, delete the shards; one process, no writer running.
-    Returns the number of entries copied."""
+    rewrite its length index, delete the shards; one process, no writer running. A shard
+    still open in a reader (a training process) is left in place with a warning instead
+    of failing the merge. Returns the number of entries copied."""
     # Every unreachable handle on the shards is closed before they are deleted.
     gc.collect()
     main = kv.KVault(path)
@@ -302,8 +307,16 @@ def merge_shards(path: str) -> int:
         vault.close()
         del vault
         for suffix in ("", "-wal", "-shm"):
-            if os.path.exists(shard + suffix):
-                os.remove(shard + suffix)
+            target = shard + suffix
+            if not os.path.exists(target):
+                continue
+            try:
+                remove_file(target)
+            except PermissionError:
+                log.warning(
+                    "shard is still open, not deleted; stop training before merging",
+                    shard=target,
+                )
     if main.get(INDEX_KEY) is not None or copied:
         store = TensorStore(path)
         store.write_index()

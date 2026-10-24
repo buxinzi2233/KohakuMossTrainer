@@ -189,7 +189,12 @@ class HostArena:
         if err is None:
             self.registered = weakref.finalize(self, _unregister, buf, self.device)
             return self
-        cudart.reset_last_error()
+        try:
+            cudart.reset_last_error()
+        except (RuntimeError, OSError) as reset_err:
+            # The fallback is the point: a build without a shared libcudart keeps
+            # going, at worst a later launch check raises the stale error itself.
+            log.warning(f"could not clear the CUDA runtime's last error ({reset_err})")
         held = self.nbytes
         self._to_chunks()
         log.warning(

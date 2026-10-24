@@ -3,13 +3,16 @@ manifest keys."""
 
 import hashlib
 import json
+import locale
 import os
 
+from kohakumoss_common.log import get_logger
 from kohakumoss_data.caption.tags import split_tags
 from kohakumoss_data.format.header import probe_image
 from kohakumoss_data.seeds import content_hash
 from kohakumoss_data.types import CatalogRow
 
+log = get_logger(__name__)
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".jxl", ".avif")
 
 
@@ -27,11 +30,24 @@ def file_fingerprint(path: str) -> str:
 
 
 def read_text(path: str) -> str | None:
-    """A sidecar's stripped text, or None when absent."""
+    """A sidecar's stripped text, or None when absent. UTF-8 (a BOM is dropped: editors
+    on Windows write one); a file in the locale's legacy encoding (Windows ANSI) is read
+    with replacement characters and one warning naming it."""
     if not os.path.exists(path):
         return None
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        return handle.read().strip()
+    try:
+        with open(path, encoding="utf-8-sig") as handle:
+            return handle.read().strip()
+    except UnicodeDecodeError:
+        encoding = locale.getpreferredencoding(False)
+        log.warning(
+            f"sidecar is not UTF-8, read as {encoding} (replacement characters "
+            f"possible): {path}",
+            path=path,
+            encoding=encoding,
+        )
+        with open(path, encoding=encoding, errors="replace") as handle:
+            return handle.read().strip()
 
 
 def apply_sidecars(row: CatalogRow, stem: str, txt_as: str) -> None:

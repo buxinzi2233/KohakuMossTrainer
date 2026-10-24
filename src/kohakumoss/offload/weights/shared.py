@@ -1,10 +1,13 @@
 """Host memory the ranks of one node share (DDP over streamed `swap` blocks): one
-/dev/shm region rank 0 creates and fills and every rank maps, and the block owner plan
-of the host optimiser shards. Linux only, one node. See docs/guides/multi-gpu.md (shared
-host masters)."""
+POSIX shared-memory region (KOHAKUMOSS_SHM_DIR, else /dev/shm, else the temp directory)
+rank 0 creates and fills and every rank maps, and the block owner plan of the host
+optimiser shards. POSIX only, one node. See docs/guides/multi-gpu.md (shared host
+masters)."""
 
 import math
 import os
+import sys
+import tempfile
 import uuid
 
 import torch
@@ -12,7 +15,17 @@ import torch.distributed as dist
 from torch import Tensor
 
 ALIGN = 64
-SHM_DIR = "/dev/shm"
+
+
+def _shm_dir() -> str:
+    """The directory the regions live in: KOHAKUMOSS_SHM_DIR, else /dev/shm, else the
+    system temp directory (macOS and POSIX hosts without devtmpfs)."""
+    override = os.environ.get("KOHAKUMOSS_SHM_DIR")
+    if override:
+        return override
+    if os.path.isdir("/dev/shm"):
+        return "/dev/shm"
+    return tempfile.gettempdir()
 
 
 def block_owners(n: int, world: int) -> list[int]:
@@ -42,14 +55,19 @@ class SharedHost:
     them. `pin` page-locks the mapping for asynchronous copies (CUDA)."""
 
     def __init__(self, nbytes: int, pin: bool = False, group=None):
+        if sys.platform == "win32":
+            raise RuntimeError(
+                "shared host masters need POSIX shared memory; use a non-shared layout"
+            )
         self.group = group
         self.rank = dist.get_rank(group)
         self.writer = self.rank == 0
         self.nbytes = max(int(nbytes), 1)
         name = [f"kohakumoss-{uuid.uuid4().hex}" if self.writer else None]
         dist.broadcast_object_list(name, src=0, group=group)
-        path = os.path.join(SHM_DIR, name[0])
+        path = os.path.join(_shm_dir(), name[0])
         if self.writer:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "wb") as f:
                 f.truncate(self.nbytes)
         dist.barrier(group=group)

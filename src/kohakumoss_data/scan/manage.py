@@ -4,10 +4,12 @@
 import gc
 import glob
 import os
+from pathlib import Path
 
+from kohakumoss_common.io import replace as replace_file
 from kohakumoss_data.catalog.table import open_catalog
 from kohakumoss_data.catalog.vault import STAMPS, CatalogVault
-from kohakumoss_data.format.catalog import remove_vault
+from kohakumoss_data.format.catalog import remove_file, remove_vault
 from kohakumoss_data.scan import lock
 from kohakumoss_data.scan.runner import Appender, probe_all
 
@@ -22,7 +24,7 @@ def drop(path: str) -> bool:
     remove_vault(path)
     for suffix in SIDE:
         if os.path.exists(path + suffix):
-            os.remove(path + suffix)
+            remove_file(path + suffix)
     return existed
 
 
@@ -73,9 +75,11 @@ def compact(source, path: str, workers: int = 8) -> int:
         del out, old_vault, old, appender
         gc.collect()
         remove_vault(path)
+        # `replace_file` retries while Windows keeps a target open (a reader of the
+        # old file); its signature already fits a plain path pair.
         for suffix in ("", "-wal", "-shm"):
             if os.path.exists(tmp + suffix):
-                os.replace(tmp + suffix, path + suffix)
+                replace_file(Path(tmp + suffix), Path(path + suffix))
         lock.write_ready(path, info)
         return count
     finally:

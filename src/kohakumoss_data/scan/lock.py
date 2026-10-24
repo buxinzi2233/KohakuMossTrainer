@@ -10,7 +10,10 @@ import time
 from ctypes import wintypes
 
 from kohakumoss_common.io import read_json, write_json_atomic
+from kohakumoss_common.log import get_logger
+from kohakumoss_data.format.catalog import remove_file
 
+log = get_logger(__name__)
 LOCK, READY = ".lock", ".ready"
 HOST = socket.gethostname()
 STILL_ACTIVE = 259
@@ -93,12 +96,22 @@ def acquire(path: str) -> bool:
     return False
 
 
-def release(path: str) -> None:
-    """Remove the write lock of `path`."""
+def _remove_quietly(path: str) -> None:
+    """Remove `path` (`remove_file`: retried while Windows holds it open). A file that
+    stays is only a leftover lock / marker, which `stale` and `wait_ready` cope with, so
+    a scan is never failed over it; it is logged with its name."""
     try:
-        os.remove(path + LOCK)
+        remove_file(path)
     except FileNotFoundError:
         pass
+    except PermissionError:
+        log.warning("file is still open, left in place", path=path)
+
+
+def release(path: str) -> None:
+    """Remove the write lock of `path` (a lock file that cannot be deleted is left to
+    `stale`)."""
+    _remove_quietly(path + LOCK)
 
 
 def held(path: str) -> bool:
@@ -117,10 +130,7 @@ def read_ready(path: str) -> dict | None:
 
 
 def clear_ready(path: str) -> None:
-    try:
-        os.remove(path + READY)
-    except FileNotFoundError:
-        pass
+    _remove_quietly(path + READY)
 
 
 def wait_ready(path: str, timeout: float, poll: float = 0.25) -> dict:

@@ -3,6 +3,8 @@
 <a id="kohakumoss-docs"></a>
 # KohakuMoss 文档
 
+集成入口：[外部接口参考](guides/interfaces.md) — CLI 默认值、run 文件、指标、续训/停止与可复用 Python 入口。
+
 快速入口：[安装](guides/install.md) · [第一个 LoRA](guides/first-lora.md) · [配置与预设](guides/configs.md) · [RTX 5090 训练基准](performance/training-5090.md)
 
 | 章节 | 内容 |

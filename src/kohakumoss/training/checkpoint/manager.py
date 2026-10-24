@@ -7,8 +7,10 @@ once complete; only fully named directories are listed or resumed.
 """
 
 import json
+import os
 import re
 import shutil
+import stat
 from pathlib import Path
 
 from kohakumoss.parallel.launch import ranks_meet
@@ -25,10 +27,19 @@ from kohakumoss.training.checkpoint.io import (
 )
 from kohakumoss.training.checkpoint.stream import save_stream
 from kohakumoss_common.calls import nothing
+from kohakumoss_common.log import get_logger
 
+log = get_logger(__name__)
 STEP_DIR = "step_{:08d}"
 STEP_NAME = re.compile(r"step_\d{8}")
 PARTIAL = ".partial"
+
+
+def _retry_readonly(func, path, _excinfo) -> None:
+    """`shutil.rmtree` onerror of a removal: Windows refuses to delete a read-only file
+    (a checkpoint copied from a backup / another host); clear that bit and retry once."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
 
 
 def _barrier() -> None:
@@ -110,7 +121,8 @@ class CheckpointManager:
             parts.get("trainable_meta"),
         )
         if final.exists():
-            shutil.rmtree(final)
+            # A directory left by an interrupted run may hold read-only files (Windows).
+            shutil.rmtree(final, onerror=_retry_readonly)
         partial.rename(final)
         self._snap(self, step, parts["ema"], parts.get("ema_gammas", {}))
         self.prune()
@@ -142,6 +154,8 @@ class CheckpointManager:
             return
         for old in self._complete()[: -self.keep_last]:
             shutil.rmtree(old, ignore_errors=True)
+            if old.exists():
+                log.warning("checkpoint directory still present, not pruned", path=old)
 
     def latest(self) -> Path | None:
         done = self._complete()

@@ -31,7 +31,7 @@ class JsonlSource:
 
     def walk(self) -> list[WalkItem]:
         items, stats, keys = [], Listings(), Occurrences()
-        with open(self.path, encoding="utf-8") as handle:
+        with open(self.path, encoding="utf-8-sig") as handle:
             for line_no, line in enumerate(handle):
                 line = line.strip()
                 if not line:

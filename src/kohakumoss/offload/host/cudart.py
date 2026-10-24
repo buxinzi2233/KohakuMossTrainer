@@ -4,6 +4,7 @@ through the libcudart torch loaded (torch's binding has no cudaGetLastError). Se
 docs/internals/offload.md#host-arena."""
 
 import ctypes
+import os
 import sys
 from functools import cache
 from pathlib import Path
@@ -11,6 +12,8 @@ from pathlib import Path
 import torch
 
 MAPS = Path("/proc/self/maps")
+# The handles `os.add_dll_directory` returns must live while the DLL search uses them.
+DLL_DIRS: list = []
 
 
 def register(ptr: int, nbytes: int) -> str | None:
@@ -47,6 +50,26 @@ def windows_candidates() -> list[Path]:
     )
 
 
+def windows_by_name() -> ctypes.CDLL | None:
+    """`ctypes.WinDLL("cudart64_<newest>.dll")` after adding the candidates' directories
+    to the DLL search path (torch's `lib` is not always on it); None on failure."""
+    candidates = windows_candidates()
+    names = sorted({p.name for p in candidates}, reverse=True)
+    if not names:
+        return None
+    for directory in sorted({str(p.parent) for p in candidates}):
+        try:
+            DLL_DIRS.append(os.add_dll_directory(directory))
+        except (OSError, AttributeError):
+            continue
+    for name in names:
+        try:
+            return ctypes.WinDLL(name)
+        except OSError:
+            continue
+    return None
+
+
 @cache
 def runtime_library() -> ctypes.CDLL | None:
     """The libcudart this process has loaded (the instance whose last error torch
@@ -63,6 +86,7 @@ def runtime_library() -> ctypes.CDLL | None:
             for dll in windows_candidates():
                 if kernel32.GetModuleHandleW(str(dll)):
                     return ctypes.CDLL(str(dll))
+            return windows_by_name()
     return None
 
 

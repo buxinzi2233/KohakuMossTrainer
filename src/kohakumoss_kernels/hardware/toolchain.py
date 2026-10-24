@@ -6,7 +6,9 @@ Linux). See docs/guides/install-windows.md#compiler-setup.
 import glob
 import importlib.metadata
 import importlib.util
+import locale
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -31,10 +33,19 @@ VS_ROOTS = (
 )
 VC_COMPONENT = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
 VCVARS = Path("VC", "Auxiliary", "Build", "vcvars64.bat")
-CL_GLOB = r"*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\cl.exe"
+CL_GLOB = r"*\*\VC\Tools\MSVC\*\bin\Host*\**\cl.exe"
+HOST_ARCH = {
+    "AMD64": ["x64"],
+    "X86_64": ["x64"],
+    "ARM64": ["x64", "arm64"],
+    "X86": ["x64", "x86"],
+}
 PATH_LISTS = ("PATH", "INCLUDE", "LIB", "LIBPATH")
 MSVC_NAME = "cl.EXE"
 NO_MSVC = "MSVC (x64 C++ tools) not found; install VS Build Tools with 'Desktop C++'"
+VCVARS_TIMEOUT = 120
+# A console-less (GUI) process must not flash a cmd window per vcvars call.
+CREATIONFLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 @dataclass(frozen=True)
@@ -99,19 +110,34 @@ def vswhere(*args: str) -> list[str]:
     return _vswhere(*args)
 
 
+def host_preference() -> list[str]:
+    """This machine's MSVC `bin/Host*` directories, best first: x64 everywhere (x64
+    emulation on ARM64), arm64 only as the fallback of an ARM64 machine."""
+    return HOST_ARCH.get(platform.machine().upper(), ["x64"])
+
+
+def _host_rank(path: str) -> tuple[int, str]:
+    """Sort key of a `cl.exe`: this machine's host directory first, then the path."""
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    host = next((p[4:].lower() for p in parts if p.lower().startswith("host")), "")
+    order = host_preference()
+    return (order.index(host) if host in order else len(order), path.lower())
+
+
 def msvc_compilers() -> list[str]:
-    """Every x64 MSVC `cl.exe`: under the installs vswhere lists, then under the
-    Program Files roots (VS_ROOTS)."""
+    """Every MSVC `cl.exe` of any host architecture: under the installs vswhere lists,
+    then under the Program Files roots (VS_ROOTS); this machine's host directory first."""
     found: list[str] = []
     for root in _vswhere("-all", "-property", "installationPath"):
         found += glob.glob(
-            os.path.join(root, "VC", "Tools", "MSVC", "*", "bin", "Hostx64", "x64")
-            + os.sep
-            + "cl.exe"
+            os.path.join(
+                root, "VC", "Tools", "MSVC", "*", "bin", "Host*", "**", "cl.exe"
+            ),
+            recursive=True,
         )
     for root in VS_ROOTS:
-        found += glob.glob(os.path.join(root, CL_GLOB))
-    return found
+        found += glob.glob(os.path.join(root, CL_GLOB), recursive=True)
+    return sorted(dict.fromkeys(found), key=_host_rank)
 
 
 @cache
@@ -129,14 +155,52 @@ def vcvars_script() -> Path | None:
     return Path(max(found)) if found else None
 
 
-def _run_vcvars(script: Path) -> dict[str, list[str]]:
-    """The environment change `script` makes: {VAR: ["prepend" | "set", value]}."""
-    out = subprocess.run(
-        f'cmd /d /s /c ""{script}" >nul 2>&1 && set"',
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout
+def _decode_env(out: bytes) -> str | None:
+    """`out` decoded with the first of UTF-8, the locale code page and the Windows ANSI
+    code page that yields no replacement character; None when none of them does (the
+    capture is then dropped instead of polluting the environment with mojibake)."""
+    for encoding in ("utf-8", locale.getpreferredencoding(False), "mbcs"):
+        try:
+            text = out.decode(encoding, errors="replace")
+        except LookupError:
+            continue
+        if "\ufffd" not in text:
+            return text
+    return None
+
+
+def _run_vcvars(script: Path) -> tuple[dict[str, list[str]], str]:
+    """The environment change `script` makes — {VAR: ["prepend" | "set", value]} — and a
+    short reason when the capture timed out, failed or could not be decoded ("" else).
+
+    `cmd` writes `set` in the console's OEM/ANSI code page, so the output is captured as
+    bytes and decoded by `_decode_env` rather than with the locale's text mode."""
+    command = f'cmd /d /s /c ""{script}" >nul 2>&1 && set"'
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            timeout=VCVARS_TIMEOUT,
+            creationflags=CREATIONFLAGS,
+        )
+    except subprocess.TimeoutExpired:
+        return {}, f"vcvars64 timed out after {VCVARS_TIMEOUT} s"
+    except OSError as err:
+        return {}, f"vcvars64 could not run: {err}"
+    out = _decode_env(proc.stdout or b"")
+    if out is None:
+        return (
+            {},
+            "vcvars64 output is not decodable in UTF-8, the locale or ANSI code page",
+        )
+    detail = ""
+    if proc.returncode != 0:
+        why = _decode_env(proc.stderr or b"") or ""
+        line = next((ln.strip() for ln in why.splitlines() if ln.strip()), "")
+        detail = f"vcvars64 exited {proc.returncode}" + (
+            f": {line[:200]}" if line else ""
+        )
     delta: dict[str, list[str]] = {}
     for line in out.splitlines():
         key, sep, value = line.partition("=")
@@ -151,7 +215,9 @@ def _run_vcvars(script: Path) -> dict[str, list[str]]:
             delta[key.upper()] = ["prepend", os.pathsep.join(added)]
         else:
             delta[key.upper()] = ["set", value]
-    return delta
+    if not out.strip() and not detail:
+        detail = "vcvars64 set no environment variables"
+    return delta, detail
 
 
 def _dirs_exist(delta: dict[str, list[str]]) -> bool:
@@ -176,6 +242,21 @@ def _apply(delta: dict[str, list[str]]) -> None:
         added = [p for p in value.split(os.pathsep) if p and p.lower() not in known]
         if added:
             os.environ[key] = os.pathsep.join(added + ([current] if current else []))
+    if os.environ.get("INCLUDE") and os.environ.get("LIB"):
+        # setuptools / torch's cpp_extension then trust this environment instead of
+        # querying the registry for the SDK.
+        os.environ.setdefault("DISTUTILS_USE_SDK", "1")
+        os.environ.setdefault("MSSdk", "1")
+
+
+def windows_sdk_present() -> bool:
+    """True when a Windows 10/11 SDK include tree is here. Kept local on purpose:
+    `kohakumoss.cli.missing` imports this module, so importing it back would cycle."""
+    if os.environ.get("WindowsSdkDir"):
+        return True
+    roots = [os.environ.get(name) for name in ("ProgramFiles(x86)", "ProgramFiles")]
+    pattern = os.path.join("Windows Kits", "10", "Include", "*", "ucrt", "stdio.h")
+    return any(root and glob.glob(os.path.join(root, pattern)) for root in roots)
 
 
 def _msvc_cxx(cl: str) -> str:
@@ -185,7 +266,13 @@ def _msvc_cxx(cl: str) -> str:
 
 def _windows_toolchain() -> Toolchain:
     source = "dev-shell"
-    if not (os.environ.get("VCINSTALLDIR") and shutil.which("cl")):
+    detail = ""
+    if not (
+        os.environ.get("VCINSTALLDIR")
+        and os.environ.get("INCLUDE")
+        and os.environ.get("LIB")
+        and shutil.which("cl")
+    ):
         script = vcvars_script()
         if script is None:
             return Toolchain(False, "missing", os.environ.get("CXX"), None, NO_MSVC)
@@ -194,14 +281,16 @@ def _windows_toolchain() -> Toolchain:
         delta = stored.get(key)
         source = "vcvars-cache"
         if delta is None or not _dirs_exist(delta):
-            delta = _run_vcvars(script)
+            delta, detail = _run_vcvars(script)
             source = "vcvars"
             if _dirs_exist(delta):
                 save_json(cache_dir() / "toolchain" / "vcvars.json", {key: delta})
         _apply(delta)
     cl = shutil.which("cl")
     if cl is None:
-        return Toolchain(False, "missing", os.environ.get("CXX"), None, NO_MSVC)
+        return Toolchain(
+            False, "missing", os.environ.get("CXX"), None, detail or NO_MSVC
+        )
     cxx = os.environ.get("CXX")
     if not cxx or Path(cxx).name.lower() == "cl.exe":
         os.environ["CXX"] = _msvc_cxx(cxx if cxx and os.path.isfile(cxx) else cl)
@@ -211,7 +300,25 @@ def _windows_toolchain() -> Toolchain:
     tilelang_cc = sys.modules.get("tilelang.contrib.cc")
     if tilelang_cc is not None:
         tilelang_cc.get_cplus_compiler.cache_clear()
-    return Toolchain(True, source, os.environ["CXX"], os.environ.get("VCToolsVersion"))
+    if not (os.environ.get("INCLUDE") and os.environ.get("LIB")):
+        return Toolchain(
+            False,
+            source,
+            os.environ["CXX"],
+            None,
+            detail or "INCLUDE/LIB not set (kernel JIT finds no C/C++ headers or libs)",
+        )
+    if not windows_sdk_present():
+        return Toolchain(
+            False,
+            source,
+            os.environ["CXX"],
+            None,
+            detail or "no Windows SDK (Windows Kits\\10\\Include\\*\\ucrt\\stdio.h)",
+        )
+    return Toolchain(
+        True, source, os.environ["CXX"], os.environ.get("VCToolsVersion"), detail
+    )
 
 
 @cache
@@ -281,12 +388,29 @@ def compilers() -> dict[str, str]:
     return out
 
 
+def _prepend_path(directory: str) -> None:
+    """Put `directory` first on this process's PATH, once (idempotent): the JITs spawn
+    nvcc's siblings (ptxas, cicc) by name."""
+    known = {p.lower() for p in os.environ.get("PATH", "").split(os.pathsep) if p}
+    if directory.lower() in known:
+        return
+    current = os.environ.get("PATH", "")
+    os.environ["PATH"] = directory + (os.pathsep + current if current else "")
+
+
 @cache
 def nvcc_version() -> str | None:
     home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-    nvcc = shutil.which("nvcc") or (str(Path(home, "bin", "nvcc")) if home else None)
+    exe = "nvcc.exe" if sys.platform == "win32" else "nvcc"
+    nvcc = shutil.which("nvcc") or (
+        str(Path(home, "bin", exe))
+        if home and Path(home, "bin", exe).is_file()
+        else None
+    )
     if nvcc is None:
         return None
+    if sys.platform == "win32":
+        _prepend_path(str(Path(nvcc).parent))
     try:
         out = subprocess.run(
             [nvcc, "--version"], capture_output=True, text=True, check=False

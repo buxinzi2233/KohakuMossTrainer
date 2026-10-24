@@ -2,6 +2,8 @@
 
 # KohakuMoss docs
 
+Integration: [external interface reference](guides/interfaces.md) — CLI defaults, run files, metrics, resume/shutdown and reusable Python entries.
+
 | section | content |
 | --- | --- |
 | [guides/](guides/README.md) | install (Windows / Linux / Intel Arc / Colab), configs and presets, host RAM, datasets and caches, first LoRA, full finetune, inference and comparison grids, export to ComfyUI, logging, multi-GPU, the script catalogue |

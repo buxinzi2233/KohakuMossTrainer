@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kohakumoss"
-version = "0.1.0"
+version = "1.0.0"
 description = "Finetuning framework for MOSS-Image: LyCORIS algorithms and full finetune, per-arch kernels, fp16/bf16, offload, multi-GPU, Windows + Linux."
 readme = "README.md"
 requires-python = ">=3.10"

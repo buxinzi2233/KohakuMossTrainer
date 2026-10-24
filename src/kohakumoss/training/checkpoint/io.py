@@ -135,7 +135,7 @@ def load_checkpoint(path: str | Path) -> dict:
         "trainable": load_file(str(path / "trainable.safetensors")),
         "ema": load_file(str(ema_file)) if ema_file.exists() else {},
         "optim": load_pt(path / "optim.pt"),
-        "state": json.loads((path / "state.json").read_text()),
+        "state": json.loads((path / "state.json").read_text(encoding="utf-8")),
     }
 
 
