@@ -40,6 +40,7 @@ keys, which the source never sees:
 | `parquet` | path column (`image_col`, default `image`) or bytes column (`bytes_col`) | `root` as for `jsonl`; the same columns as the jsonl keys; needs `pyarrow` (extra `parquet`) |
 | `webdataset` | uncompressed `.tar` (`path` is a glob), members `<key>.<ext>` | `txt_as` for `<key>.txt`; `<key>.json` with the folder json keys; members read by byte offset at load time |
 | `moss_shard` | the native format | see [The `moss_shard` format](#the-moss_shard-format) |
+| `gbc` | a GBC dataset (KohakuGBC): `dataset.json` + `shards/shard_XXXXX/{images.zip, graphs.db, meta.db, manifest.parquet}` | `shards` (default all); needs `kohakugbc-data` (extra `gbc`, Python 3.11+); captions through the `gbc` template, see [GBC datasets](#gbc-datasets) |
 
 - Rows are keyed on image files; a sidecar without an image is ignored.
 - Scanning reads image headers only (size, EXIF orientation, alpha).
@@ -67,6 +68,15 @@ Templates (`CAPTION = {"template": ...}`):
 - `mix`: natural language with probability `p_nl`, tags otherwise.
 - `json`: `row.json` plus listed row fields as `key: value` lines or compact JSON, with
   `field_dropout` (fields in `keep` never drop).
+- `gbc`: a `gbc` source's samples from their graph and metadata, see
+  [GBC captions](#gbc-captions).
+
+A template is bound to its dataset entry once, at build (`bind_template`): a template
+with a `bind(source, geometry_of, max_chars)` reads the source's records, the row's
+geometry (its target size and centre crop) and the caption length the text budget
+allows (`MAX_TEXT_TOKENS` under the planner's chars-per-token estimate); the others
+render from the row alone. A template that follows the row's crop (`geometric`) refuses
+`CROP="random"`, `RESOLUTION_MODE="shifted_square"` and `FLIP`.
 
 Caption variant `k` of row `r` is rendered from a generator seeded by `(seed, r, k)`, so
 there are exactly `max(1, CAPTION_VARIANTS)` captions per row (0 draws variant 0): what
@@ -279,6 +289,7 @@ and a probe:
 | `jsonl`, `parquet` (path column) | a record, key `locator#n` | the image's (size, mtime_ns) plus a 63-bit hash of the record |
 | `parquet` (bytes column) | the file | its (size, mtime_ns) |
 | `webdataset` | a tar | its index, size, mtime_ns |
+| `gbc` | a shard | (size, mtime_ns) of its `manifest.parquet`, `graphs.db`, `meta.db`, `images.zip` |
 
 Each dataset entry has a catalog file `<cache>/catalog/<source>-<digest>.db` (the digest
 covers the source kind, its absolute path and its options); `<cache>` is the latent /
@@ -321,21 +332,25 @@ new ids, copying unchanged rows, which is exactly what a cold scan writes.
 
 ### The catalog file
 
-One KohakuVault file, a ColumnVault and a KVault on the same path:
+One KohakuVault (>= 1.1) file, a ColumnVault and a KVault on the same path; readers
+open both read-only:
 
 | part | contents |
 | --- | --- |
-| fixed i64 columns | `w`, `h`, `has_alpha`, `live`, `group_id`, `tags_chars`, `nl_chars`, `artist_chars`, `rating_chars`, `json_chars`; the stamps `st_size`, `st_mtime`, `s1_size` ... `s3_mtime` |
+| fixed i64 columns | `w`, `h`, `has_alpha`, `live`, `group_id`, `tags_chars`, `nl_chars`, `artist_chars`, `rating_chars`, `json_chars`, `prompt_chars` (a source's bound on its longest caption, `extra["prompt_chars"]`; 0 for the others); the stamps `st_size`, `st_mtime`, `s1_size` ... `s3_mtime` |
 | `weight32` | 4 little-endian float32 bytes per row |
 | `item` (str) | the scan item each row came from |
 | KVault `r<id, 8-byte BE>` | msgpack of the row's variable fields |
 | KVault `meta:info`, `meta:groups` | schema, generation, row count, source kind; group names |
 
-Opening reads each planning column with one range read straight into numpy; the stamps and items are read only by a rescan. `catalog.db` of a
+Opening reads each planning column with one range read (`Column.read_buffer`) straight
+into numpy; the stamps and items are read only by a rescan. `catalog.db` of a
 `moss_shard` dataset and `catalog_build.py` files use the same layout, the only one
-the runtime reads ([datasets.md](../guides/datasets.md#4-optional-import-into-shards)
-for a file of another layout). A `moss_shard` dataset without its `shards/` is an
-error saying so.
+the runtime reads: a file whose fixed columns are not all there (another layout, or one
+written by a KohakuVault before 1.0, whose columns 1.x does not read) is rebuilt by a
+rescan when it is a scan cache, and is an error naming the re-import for a prebuilt one
+([datasets.md](../guides/datasets.md#4-optional-import-into-shards)). A `moss_shard`
+dataset without its `shards/` is an error saying so.
 
 ## The `moss_shard` format
 
@@ -350,6 +365,90 @@ dataset/
 
 `scripts/data/catalog_build.py` imports any source (`import_to`) or just writes its
 catalog (`catalog`) so later runs skip the scan.
+
+## GBC datasets
+
+The `gbc` source reads a dataset in KohakuGBC's format through `kohakugbc-data`
+(`pip install "kohakumoss[gbc]"`, CPython 3.11+):
+
+```
+<root>/dataset.json                format, version, the finished shards, a header
+<root>/shards/shard_XXXXX/
+  images.zip                       the images as captioned (KohakuClip image shard)
+  graphs.db                        key -> GBC graph (typed msgpack, zstd)
+  meta.db                          key -> metadata dict (any content)
+  manifest.parquet                 key, index, w, h, codec, sizes, extra columns
+```
+
+- One walk item per shard (the catalog cache keeps a shard's rows until one of its four
+  files changes); a row's locator is `<shard>/<key>`, its size the manifest's.
+- The probe reads each sample's graph and metadata once to store `prompt_chars`: the
+  graph's full-detail prompt text plus every top-level metadata string, a bound on any
+  `gbc` caption of the sample (the planner's text estimate reads this column).
+- `open(locator)` is the stored image bytes; `record(locator)` the graph and metadata.
+  The reader opens its files on first use in each process.
+- GBC boxes are fractions of the stored image. Captions follow the row's centre crop and
+  target size (see below), so a `gbc` caption refuses `CROP="random"`,
+  `RESOLUTION_MODE="shifted_square"` and `FLIP`.
+
+## GBC captions
+
+The `gbc` template turns a sample's record into a caption in three steps: the sections,
+a format, the draw.
+
+**Sections.**
+
+| section | from |
+| --- | --- |
+| metadata sections (any name) | `meta`: `{name: rule}` per section, or `meta_formatter`: a dotted path to `f(meta) -> {name: str or [str]}` |
+| `tags` | one of `tags["sources"]` per sample, by weight: `"meta:<field>"` (a metadata list) or `"graph:root"` (the root's tags in the graph) |
+| `nl` | the root's long caption; its short one (its `short` caption, else the long one's first sentence) with probability `nl["short"]` |
+| `graph` | the GBC prompt text (below) |
+
+A rule takes the value at `field` (a dotted path) and writes it as items:
+
+| rule key | does |
+| --- | --- |
+| `bins` | `[[lower, tag], ...]`, highest first: the first `lower <= value`; `""` writes nothing |
+| `ranges` | `[[first, last, tag], ...]`, both ends inclusive |
+| `map` | `{value: text or [texts]}` |
+| (none) | the value itself (a string, a number or a list) |
+| `drop` | the whole section's drop probability |
+
+A missing field, or a value outside every bin / range / map key, writes nothing.
+`underscores` (default True) turns `_` into spaces in list items; nothing is escaped.
+
+Every tag list (both `tags` sources and the graph's tags) drops the items matching a
+`tags["exclude"]` regex and, case-insensitively, the items of the `tags["dedupe"]`
+metadata sections (e.g. a tagger's `rating:*` tags, or names an artist section already
+holds).
+
+**Format.** `formats` is a weighted list of section orders. A sample draws among the
+formats whose content sections (`tags`, `nl`, `graph`) it has, by weight; a metadata
+section with no items is left out. Items join with `list_sep` (`", "`); a section is
+followed by `text_sep` (`"\n"`) after a text section (`nl`, `graph`, which end as
+written) and by `section_sep` (`",\n"`) otherwise; `prefix` / `suffix` wrap the
+caption.
+
+**Draw.**
+
+- `tags`: each tag of the drawn source drops with probability `tags["drop"]`, the rest
+  shuffled (`tags["shuffle"]`).
+- `graph`: the graph's DAG with its boxes mapped into the row's crop (a box falling
+  outside is dropped, its vertex kept), at detail levels from
+  `kohakugbc_data.prompt.detail.sample_levels` (`graph["keep"]`; the root always at full
+  detail), every shown tag list (the root's included) dropped per tag with
+  `graph["tag_drop"]`, rendered on the row's training canvas with the renderer's default
+  header and coordinates (`<gbc bbox=yxyx space=abs_centralized canvas=WxH>`).
+- **Fit.** A caption longer than the text budget (`MAX_TEXT_TOKENS` in characters under
+  the planner's estimate, times `fit["margin"]`) is drawn again with the dropout raised
+  by a step (tag drop `+ fit["tag_drop_step"]` up to `fit["tag_drop_max"]`, keep
+  `- fit["keep_step"]` down to `fit["keep_min"]`), same format and tag source, until it
+  fits; then `fit["fallback"]` (a section order) is drawn. Metadata sections are never
+  dropped by the fit.
+
+Every draw comes from the caption generator of (seed, row, variant), so a caption is a
+fixed function of the row and the variant, as for the other templates.
 
 ## HostBatch
 
@@ -392,7 +491,9 @@ its workers in order, so the stream is the same for any worker count. Resume sta
 - **Fresh worker processes.** Workers start from a fresh interpreter (`kohakumoss_data.loader.stateless.worker_context`: `forkserver` on
   Linux, `spawn` on Windows), so the dataset (sources, catalog, templates, caches) is
   pickled by value; file handles reopen lazily per process. Batches do not depend on
-  the start method.
+  the start method. Each worker takes the tensor sharing strategy of the loader's
+  process (`share_like`): a process that holds many batches (the encode feed's main
+  process, `file_system`) keeps no file descriptor per buffered tensor.
 - **Transform.** `Loader(transform=...)` / `build_loader(cfg, rank, world,
   transform=...)` (a picklable callable or a dotted path) runs on every batch inside the
   worker, before the DataLoader pins it (with `PIN_MEMORY` and an accelerator with

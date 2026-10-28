@@ -52,7 +52,14 @@ Each layout has a data layer (`kohakumoss-config new train --source <name>`,
 {"source": "parquet", "path": "dataset/train.parquet", "image_col": "image", "bytes_col": None, "root": None}
 {"source": "webdataset", "path": "shards/*.tar", "txt_as": "tags"}  # <key>.png + <key>.txt / <key>.json members
 {"source": "moss_shard", "path": "dataset_shards"}                  # an imported directory (section 4)
+{"source": "gbc", "path": "my-gbc-set", "caption": {"template": "gbc", ...}}  # a KohakuGBC dataset
 ```
+
+A GBC dataset (images, GBC graphs and metadata from KohakuGBC) needs
+`pip install "kohakumoss[gbc]"` (Python 3.11+) and the `gbc` caption template, which
+builds each caption from the sample's metadata and graph
+([data.md](../concepts/data.md#gbc-captions)); `examples/gbc-danbooru/` is a complete
+run.
 
 The manifest sources (`jsonl`, `parquet`) read:
 
@@ -149,7 +156,8 @@ Add `"import_to": "/path/out"` to a dataset entry and run `catalog_build.py`; th
 `{"source": "moss_shard", "path": "/path/out"}`. Shards are large sequential files,
 which suit network storage better than many small images.
 
-A catalog file written in another layout than the current one:
+A catalog file written in another layout than the current one (including any written
+with KohakuVault before 1.0: KohakuVault 1.x does not read their columns):
 
 - a scanning source's cached catalog is rebuilt by a rescan (one WARNING naming the
   file);

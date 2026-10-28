@@ -14,6 +14,7 @@ from kohakumoss.memory.profiles import KNOB_FIELDS, ORDER, PROFILES, resolve
 from kohakumoss.memory.release import release_problems
 from kohakumoss.offload.accel import default_type
 from kohakumoss.precision import COMPUTE
+from kohakumoss.training.checks.encode import encode_problems
 from kohakumoss.training.checks.encoders import text_problems, vae_problems
 from kohakumoss.training.checks.objective import (
     REAL_VARIANTS,
@@ -54,7 +55,7 @@ __all__ = [
 
 KNOWN = frozenset(
     """WEIGHTS VARIANT ARCH_OVERRIDES TRANSFORMER TEXT_ENCODER TEXT_DEVICE TEXT_ENCODE VAE
-    VAE_ENCODE VAE_DTYPE TRAIN_TEXT_REFINER DATASETS
+    VAE_ENCODE VAE_DTYPE ENCODE_DEVICES ENCODE_DEPTH ENCODE_CHUNK TRAIN_TEXT_REFINER DATASETS
     RESOLUTION_MODE TARGET_AREA SIZE_STEP ASPECT_RANGE UPSCALE MAX_TOKENS BATCH_SIZE
     CAPTION TEXT_DROP LATENT_CACHE TEXT_CACHE CACHE_DTYPE CACHE_DIR CAPTION_VARIANTS FLIP
     NUM_WORKERS SEED ALGO PRESET DIM ALPHA ALGO_KWARGS DORA DORA_DETACH DROPOUT
@@ -65,7 +66,7 @@ KNOWN = frozenset(
     PIPELINE_SCHEDULE PIPELINE_SPLIT TRACE_STEPS PROFILE_STEPS FSDP_REDUCE FSDP_RESHARD
     DDP_BACKEND DDP_REDUCE_DTYPE DIST_TIMEOUT DIST_GATE_TIMEOUT DIST_BIND
     CHECKPOINT STREAM STREAM_RESIDENT PINNED ACT_OFFLOAD OPTIM_STATE GRAD_OFFLOAD
-    FUSED_STEP BASE_PRECISION FP8_RECIPE FP8_DGRAD
+    FUSED_STEP BASE_PRECISION FP8_RECIPE FP8_DGRAD INT8_COMPUTE INT8_DGRAD
     MICROBATCHES KERNELS TUNE RETUNE_STEPS COMPILE DRIVER STEPS GRAD_ACC OUTPUT_DIR RUN_NAME LOGGER
     LOG_EVERY METRICS_EVERY PROGRESS SAMPLE_PROMPTS SAMPLE_EVERY SAMPLE_STEPS SAMPLE_CFG SAMPLE_SHIFT
     SAMPLE_SKIP_LAYERS SAMPLE_SIZE SAMPLE_SEEDS VALIDATE_EVERY VALIDATION SAVE_EVERY
@@ -246,6 +247,7 @@ def validate(k: dict) -> list[str]:
     p += _memory_problems(k)
     p += text_problems(k, arch_of)
     p += vae_problems(k)
+    p += encode_problems(k, arch_of)
     layout = _layout(k)
     p += parallel_problems(k, layout.problems if layout is not None else None)
     p += optimizer_problems(k)

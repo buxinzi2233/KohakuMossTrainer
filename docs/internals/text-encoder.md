@@ -11,7 +11,8 @@ layouts, encode-ahead, quantization, reporting, and then the text ops and their 
 
 One knob set (`kohakumoss.types.plans.TextEncoderPlan`) serves:
 
-- training: `TEXT_ENCODE`, plus `TEXT_DEVICE` for the device;
+- training: `TEXT_ENCODE`, plus `TEXT_DEVICE` for the device, or `ENCODE_DEVICES` for
+  encoder cards of their own ([encode-feed.md](encode-feed.md));
 - the pipeline: `text_plan=`, and `TEXT_ENCODE` in `scripts/sample/sample.py`;
 - the offline cache factory: `kohakumoss.encoders.text.text_encoder`.
 
@@ -21,6 +22,7 @@ One knob set (`kohakumoss.types.plans.TextEncoderPlan`) serves:
 | `free_after_use` | `False`, `True` | drop the model after its first pass |
 | `precision` | `auto`, `compute`, `int8`, `fp8`, `fp8_compute`, `mxfp8`, `w4a8` | weight storage and GEMMs ([Quantization](#quantization)); `auto` is what the weights store ([ComfyUI files](#comfyui-files)), `w4a8` a ComfyUI W4A8 file only |
 | `w4a8` | `auto`, `int8`, `packed` | a W4A8 file's decode ([ComfyUI files](#comfyui-files)) |
+| `int8_compute` | `False`, `True` | the int8 linears (an int8 / W4A8 file under `auto`, or `int8`) run int8 GEMMs with per-row int8 activations instead of weight-only; CUDA, `quant_group` 0; the cache key gains `int8c` ([quant-kernels.md](quant-kernels.md#int8-compute)) |
 | `quant_group` | `0` (per output channel), or any multiple of 16 (e.g. `64`, `128`) | weight-only scale groups of input columns; `int8` / `fp8` only |
 | `fp8_recipe` | `row`, `tensor`, `block` | `fp8_compute` scaling |
 | `stored` | `""`, a file | a pre-quantized text encoder ([below](#pre-quantized-text-encoder)) |
@@ -168,6 +170,16 @@ With the online text cache, `TextAhead` wraps the loader:
   resume repeats nothing and skips nothing.
 
 Under `ring` / `offload` one pass moves the weights once for `ahead` batches.
+
+### Over-long prompts
+
+A sample whose text the planner fits by cutting (`OVERLONG="truncate_text"`, a
+`text_limit` > 0) keeps the first `text_limit` rows of its encoding. `encode(prompts,
+limits)` cuts each prompt's token ids to its limit before the pass, so the encoder runs
+only the tokens the step keeps; the encode feed passes the limits. Every layer of
+Qwen3.5 is causal (the gated delta rule, causal conv and attention), so the kept rows
+equal those of the full prompt's pass cut afterwards, within the encoder's precision. A
+cut encoding is never written to the online cache (the writer stores only uncut ones).
 
 ## Quantization
 

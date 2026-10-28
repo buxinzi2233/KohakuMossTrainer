@@ -54,7 +54,7 @@ from kohakumoss.types.plans import TextEncoderPlan
 from kohakumoss.weights import TEXT, comfy_file, hf_root, is_comfy_folder
 from kohakumoss_common.calls import nothing
 from kohakumoss_kernels.dtypes import short
-from kohakumoss_kernels.hardware.current import synchronize
+from kohakumoss_kernels.hardware.current import on_device, synchronize
 
 ENCODER_ID = "qwen3.5-9b"
 log = get_logger(__name__)
@@ -181,11 +181,20 @@ def _released(*args):
     )
 
 
-def _first_pass(run: Callable, fn: Callable[[], None], encoder, prompts) -> list:
+def _first_pass(
+    run: Callable, fn: Callable[[], None], encoder, prompts, limits=None
+) -> list:
     """`before_first`'s pass: put `run` back, run `fn()`, then `run` the prompts."""
     encoder._run = run
     fn()
-    return run(encoder, prompts)
+    return run(encoder, prompts, limits)
+
+
+def cut_rows(rows: list[list[int]], limits) -> list[list[int]]:
+    """Token ids of prompt i cut to its first `limits[i]` (0 or no limits: all)."""
+    if not limits:
+        return rows
+    return [r[: limit or None] for r, limit in zip(rows, limits)]
 
 
 class QwenTextEncoder:
@@ -305,7 +314,7 @@ class QwenTextEncoder:
             ck = _stored(model_dir, plan) if plan.stored else hf_checkpoint(model_dir)
         choose = auto_memory or partial(default_auto_memory, plan=plan)
         w4a8 = auto_w4a8 or partial(default_w4a8, plan=plan)
-        with hf_bars_off():
+        with hf_bars_off(), on_device(on):
             text, placement, report, plan = load_placed_text(ck, plan, on, choose, w4a8)
         return cls(
             text,
@@ -327,22 +336,23 @@ class QwenTextEncoder:
         return token_ids(self.tokenizer, prompts, self.max_length)
 
     @torch.no_grad()
-    def _encode(self, prompts: Sequence[str]) -> list[Tensor]:
-        """The prompts' embeddings; the process's first encode also encodes the empty
-        prompt, in a pass of its own, so the prompts' packs are the same on every
-        call."""
+    def _encode(self, prompts: Sequence[str], limits=None) -> list[Tensor]:
+        """The prompts' embeddings (prompt i's first `limits[i]` tokens when given);
+        the process's first encode also encodes the empty prompt, in a pass of its
+        own, so the prompts' packs are the same on every call."""
         if self._empty is None:
             self._empty = self._pass([""])[0]
-        out = self._pass(list(prompts)) if prompts else []
+        out = self._pass(list(prompts), limits) if prompts else []
         self.stats["prompts"] += len(prompts)
         if self.plan.free_after_use:
             self.release()
         return out
 
-    def _pass(self, texts: list[str]) -> list[Tensor]:
-        """One text-encoder pass over `texts` (packed, placed, synchronised)."""
+    def _pass(self, texts: list[str], limits=None) -> list[Tensor]:
+        """One text-encoder pass over `texts` (packed, placed, synchronised), text i
+        cut to its first `limits[i]` tokens when given."""
         start = time.perf_counter()
-        rows = self.token_ids(texts)
+        rows = cut_rows(self.token_ids(texts), limits)
         lengths = [len(r) for r in rows]
         groups = plan_groups(lengths, self.batch, self.plan.max_tokens, self.padded)
         packs = [
@@ -350,6 +360,20 @@ class QwenTextEncoder:
             for g in groups
         ]
         self.before_pass()
+        with on_device(torch.device(self.device)):
+            out = self._placed_pass(texts, groups, packs, lengths)
+        self.after_pass()
+        for dev in {self.device, self.output_device}:
+            synchronize(dev)
+        self.stats["passes"] += 1
+        self.stats["tokens"] += sum(lengths)
+        self.stats["seconds"] += time.perf_counter() - start
+        self.stats["h2d_bytes"] = self.placement.h2d_bytes
+        return out
+
+    def _placed_pass(self, texts, groups, packs, lengths) -> list[Tensor]:
+        """The packs through the placed model (the caller holds the encoder's card
+        current)."""
         self.placement.begin()
         pbar = log_bar(
             total=self.forward.units(packs),
@@ -369,13 +393,6 @@ class QwenTextEncoder:
             del hidden
         finally:
             self.placement.end()
-        self.after_pass()
-        for dev in {self.device, self.output_device}:
-            synchronize(dev)
-        self.stats["passes"] += 1
-        self.stats["tokens"] += sum(lengths)
-        self.stats["seconds"] += time.perf_counter() - start
-        self.stats["h2d_bytes"] = self.placement.h2d_bytes
         return out
 
     def release(self) -> None:
@@ -394,9 +411,11 @@ class QwenTextEncoder:
         that encodes online)."""
         self._run = partial(_first_pass, self._run, fn)
 
-    def encode(self, prompts: Sequence[str]) -> list[Tensor]:
-        """EncodeText: one [L_i, text_dim] tensor per prompt (unpadded)."""
-        return self._run(self, prompts)
+    def encode(self, prompts: Sequence[str], limits=None) -> list[Tensor]:
+        """EncodeText: one [L_i, text_dim] tensor per prompt (unpadded); with `limits`,
+        prompt i is encoded from its first `limits[i]` tokens only (0: all). See
+        docs/internals/text-encoder.md#over-long-prompts."""
+        return self._run(self, prompts, limits)
 
     def __call__(self, prompts: Sequence[str]) -> list[Tensor]:
         return self.encode(prompts)

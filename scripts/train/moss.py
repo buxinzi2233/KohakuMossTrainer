@@ -30,6 +30,9 @@ TEXT_ENCODE = {}  # TextEncoderPlan fields (docs/internals/text-encoder.md):
 #   "kernels": {} (op -> backend, e.g. {"gated_delta_rule_varlen": "triton"})
 # Sample prompts are encoded once at build; with TEXT_CACHE="offline" the TE is freed after that.
 VAE = ""  # "" = <WEIGHTS>/vae (ComfyUI folder: flux2-vae_small, else flux2-vae) | a file name under vae/ | a path
+ENCODE_DEVICES = ()  # encoder GPUs (e.g. (4, 5)): the text encoder + VAE run there in encoder processes fed by the main process; DEVICES only train (docs/internals/encode-feed.md)
+ENCODE_DEPTH = 32  # encode feed: micro-batches each data stream keeps encoded ahead of its training ranks
+ENCODE_CHUNK = 8  # encode feed: micro-batches per encoder request (one text-encoder call, one VAE call)
 VAE_ENCODE = {}  # VaePlan fields (docs/internals/offload.md#vae):
 #   "memory": "resident" (default) | "offload" (VAE in per pass) | "ring" (block rings; "stream" is accepted too) | "auto" | "cpu" (LATENT_CACHE="offline" only)
 #   "batch": 1 (same-size images per encode call), "ahead": 1 (LATENT_CACHE "online" / "off": host batches encoded per VAE pass), "tile": False (tiled / sliced encode and decode)
@@ -155,10 +158,12 @@ FP8_RECIPE = None  # fp8_compute scaling: "tensor" | "row" | "block"  [row]
 FP8_DGRAD = (
     None  # fp8 bases: "fp8" (W^T copy, fp8 input-gradient GEMM) | "16bit"  [fp8]
 )
+INT8_COMPUTE = None  # int8 bases run int8 GEMMs (activations quantized per row), not weight-only; CUDA  [False]
+INT8_DGRAD = None  # int8 compute input gradient: "int8" | "16bit"  [int8]
 MEMORY_OVERRIDES = (
     {}
 )  # any MemoryPlan field, e.g. {"checkpoint": "sub-block", "stream": "ring"}
-# frozen-base precision: BASE_PRECISION / FP8_RECIPE / FP8_DGRAD above (docs/internals/quant-kernels.md)
+# frozen-base precision: BASE_PRECISION / FP8_RECIPE / FP8_DGRAD / INT8_COMPUTE / INT8_DGRAD above (docs/internals/quant-kernels.md)
 
 # ===================== PARALLEL =====================
 PARALLEL = "none"  # "none" | "ddp" | "fsdp" | "pipeline" | "threaded"
