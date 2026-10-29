@@ -389,6 +389,11 @@ differs:
 | `dead` / `mark_dead` | none | a fused config raising `CompileError` is dropped and the problem picks again |
 | `fallback` | none | `CompileError` from the public function runs the compiled eager composition |
 
+TileLang dead configs are scoped by kernel, device and problem key: a lowering
+failure for one shape or card must not remove that config from another problem.
+The compile cache retains the full error text, including diagnostics after generated
+source code; cached failures must remain diagnosable on subsequent calls.
+
 The problem keys are `<token bucket>-<K>-<N>-<dtype>-<flags>` for both backends
 (`_fused_linear._key`; flags: bias / gate / residual scale / residual dtype / save as
 the op has them). The qk entry passes the q / k norm weights as fp32 (one cast at the

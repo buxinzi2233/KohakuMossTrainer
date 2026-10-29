@@ -61,7 +61,7 @@ def compile_once(
                 except Exception as err:  # noqa: BLE001
                     if error is None:
                         raise
-                    kernel = error(f"{key}: {err}"[:2000])
+                    kernel = error(f"{key}: {err}")
                 _CACHE[key] = kernel
     if isinstance(kernel, Exception):
         raise type(kernel)(*kernel.args)
@@ -103,18 +103,18 @@ def compiled(builder: Callable, device: torch.device, *args) -> OnDevice:
     return OnDevice(kernel, device)
 
 
-def _config_id(kernel: str, config: dict) -> tuple:
-    return kernel, str(sorted(config.items()))
+def _config_id(kernel: str, device, key: str, config: dict) -> tuple:
+    return kernel, str(device), key, str(sorted(config.items()))
 
 
-def mark_dead(kernel: str, config: dict) -> None:
-    """Drop `config` from `kernel`'s candidates (it failed to compile on this arch)."""
-    _DEAD.add(_config_id(kernel, config))
+def mark_dead(kernel: str, device, key: str, config: dict) -> None:
+    """Drop `config` only for the device and problem where it failed to compile."""
+    _DEAD.add(_config_id(kernel, device, key, config))
 
 
-def _live(kernel: str, key: str, candidates: list[dict]) -> list[dict]:
-    """The candidates of `kernel` not marked as failing to compile."""
-    live = [c for c in candidates if _config_id(kernel, c) not in _DEAD]
+def _live(kernel: str, device, key: str, candidates: list[dict]) -> list[dict]:
+    """The candidates not marked as failing for this device and problem."""
+    live = [c for c in candidates if _config_id(kernel, device, key, c) not in _DEAD]
     if not live:
         raise CompileError(f"{kernel}: no candidate compiles for {key}")
     return live
@@ -130,7 +130,7 @@ def tuned(
         kernel,
         device,
         key,
-        lambda: _live(kernel, key, candidates),
+        lambda: _live(kernel, device, key, candidates),
         lambda c: lambda: run(c),
         shortlist=len(candidates),
         errors=(RuntimeError,),
@@ -145,7 +145,7 @@ def tuned_run(
     and the next candidate (in order) runs instead."""
     cfg = tuned(kernel, device, key, candidates, run)
     for c in (cfg, *candidates):
-        ident = _config_id(kernel, c)
+        ident = _config_id(kernel, device, key, c)
         if ident in _DEAD:
             continue
         try:

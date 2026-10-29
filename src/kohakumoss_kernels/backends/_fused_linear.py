@@ -137,7 +137,7 @@ class FusedLinear:
                 cfg = fn.args[0]
                 if self.forced or cfg["path"] != "fused":
                     raise
-                self.backend.mark_dead(name, cfg)
+                self.backend.mark_dead(name, device, key, cfg)
                 forget(name, device, key)
                 self.bound.pop((name, str(device), key), None)
 
