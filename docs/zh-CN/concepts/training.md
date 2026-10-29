@@ -140,6 +140,38 @@ MAGMA 的批量求逆会在 sm86 上出错）。训练期间通过 `MossPipeline
 - **`WEIGHTING`** 将一个依赖 σ 的权重乘到数据权重上（`none` 是 MOSS 方案；
   `x0` 和 `eps` 分别复现 x0 空间 / 噪声空间的 MSE）。
 
+<a id="stream-penalties"></a>
+### 流惩罚
+
+`STREAM_LOSS = {term: {...}}` 在每个联合块输出上对残差流加入惩罚。
+两个项都针对基座模型的大量残差通道（[massive-channels.md](massive-channels.md)）：
+pre-norm 块的 RMSNorm 除数是逐词元的增益，训练可能长出少数几个主要用来设定它的通道，
+它们的峰值会把流推到接近 fp16 上限。
+
+| 项 | 字段（默认值） | 加入的项 |
+| --- | --- | --- |
+| `concentration` | `weight`, `k` (32) | `weight` × 各块上的均值：块输出（微批次全部词元）的能量落在其 `k` 个最大通道中的占比 |
+| `peak` | `weight`, `cap` (32768), `top` (1e-4), `tau` (0.25), `sigma` ("sigma") | `weight` × 各样本上的均值，每个样本按 `sigma`（σ、1 − σ 或 1）加权，即各块上 `softplus((log m − log cap) / tau)` 的均值；`m` 是该样本在该块输出中最大的 `top` 比例 `\|x\|` 的均值，采用原始单位 |
+
+`CONCENTRATION_LOSS = {"weight": w, "k": k}` 就是单独的 `concentration` 项；
+两个旋钮只设一个。
+
+- **浓度。** 与尺度无关：它为能量集中的程度定价，而不是为能量的大小定价。权重保持很小
+  （MOSS 上 `k = 32` 时用 0.01）：权重过大会去掉这些通道，也会去掉它们提供的增益路径，
+  从而付出任务损失。
+- **峰值。** 对流中最大值的软上限。低于 `cap` 时该铰链约为零；高于它时，按
+  `(log m − log cap) / tau` 上升。top 比例把梯度摊到峰值元素上，而不是只压一个最大值，
+  并且它按样本计算，因此对任何分辨率都成立。`m` 会除以模型所带 fp16 修正的流尺度
+  （权重折叠，或 `FP16_FIX="online"` 的因子），因此无论有没有修正，`cap` 的含义都相同
+  （fp16 上限为 65504）。
+- 每个微批次按其在该步损失词元中的占比加权加入自己的惩罚，
+  因此该步的总量是词元加权均值，与损失本身一样。
+- 只在训练步骤中：验证报告原始损失。记录的指标为
+  `concentration`、`peak_loss`（未加权的铰链）和 `stream_peak`（该微批次最大的 `m`，
+  原始单位）。
+- 块输出由前向钩子读取，因此 runner 必须调用整块：
+  `CHECKPOINT="sub-block"` 会被拒绝，布局为 `PARALLEL` `none` 和 `ddp`。
+
 <a id="timestep-samplers"></a>
 ## 时间步采样器
 

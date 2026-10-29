@@ -44,6 +44,7 @@ Source.walk() ──▶ catalog file (cache) ──▶ Catalog (columns) ──�
 | `parquet` | 路径列（`image_col`，默认 `image`）或字节列（`bytes_col`） | `root` 与 `jsonl` 相同；列与 jsonl 的键相同；需要 `pyarrow`（可选依赖 `parquet`） |
 | `webdataset` | 未压缩的 `.tar`（`path` 是 glob），成员为 `<key>.<ext>` | `<key>.txt` 使用 `txt_as`；`<key>.json` 使用 folder 的 json 键；加载时按字节偏移读取成员 |
 | `moss_shard` | 原生格式 | 参见 [`moss_shard` 格式](#the-moss_shard-format) |
+| `gbc` | GBC 数据集（KohakuGBC）：`dataset.json` + `shards/shard_XXXXX/{images.zip, graphs.db, meta.db, manifest.parquet}` | `shards`（默认全部）；需要 `kohakugbc-data`（可选依赖 `gbc`，Python 3.11+）；描述文本走 `gbc` 模板，参见 [GBC 数据集](#gbc-datasets) |
 
 - 行以图像文件为标识；没有对应图像的伴随文件会被忽略。
 - 扫描只读取图像头（尺寸、EXIF 方向、alpha）。
@@ -72,6 +73,8 @@ Source.walk() ──▶ catalog file (cache) ──▶ Catalog (columns) ──�
 - `mix`：以概率 `p_nl` 使用自然语言，否则使用标签。
 - `json`：使用 `row.json` 加上列出的行字段，以 `key: value` 行或紧凑 JSON 形式输出，
   应用 `field_dropout`（`keep` 中的字段从不丢弃）。
+- `gbc`：`gbc` 数据源的样本，由它们的图与元数据构建，参见
+  [GBC 描述文本](#gbc-captions)。
 
 行 `r` 的描述文本变体 `k` 由一个以 `(seed, r, k)` 为种子的生成器渲染，
 因此每行恰有 `max(1, CAPTION_VARIANTS)` 个描述文本（0 表示抽取变体 0）：
@@ -287,6 +290,7 @@ fp16 和 bf16 的 VAE，或者 int8 和 16 位的文本编码器，会生成不�
 | `jsonl`, `parquet`（路径列） | 一条记录，键为 `locator#n` | 图像的 (size, mtime_ns) 加上记录的 63 位哈希 |
 | `parquet`（字节列） | 该文件 | 其 (size, mtime_ns) |
 | `webdataset` | 一个 tar | 其索引、size、mtime_ns |
+| `gbc` | 一个分片 | 其 `manifest.parquet`、`graphs.db`、`meta.db`、`images.zip` 的 (size, mtime_ns) |
 
 每个数据集条目都有一个目录文件 `<cache>/catalog/<source>-<digest>.db`
 （摘要包含数据源种类、其绝对路径及其选项）；`<cache>` 是潜变量 / 文本缓存目录，
@@ -359,6 +363,95 @@ dataset/
 
 `scripts/data/catalog_build.py` 导入任意数据源（`import_to`），或只写出其目录
 （`catalog`），以便后续运行跳过扫描。
+
+<a id="gbc-datasets"></a>
+## GBC 数据集
+
+`gbc` 数据源通过 `kohakugbc-data` 读取 KohakuGBC 格式的数据集
+（`pip install "kohakumoss[gbc]"`，CPython 3.11+）：
+
+```
+<root>/dataset.json                format, version, the finished shards, a header
+<root>/shards/shard_XXXXX/
+  images.zip                       the images as captioned (KohakuClip image shard)
+  graphs.db                        key -> GBC graph (typed msgpack, zstd)
+  meta.db                          key -> metadata dict (any content)
+  manifest.parquet                 key, index, w, h, codec, sizes, extra columns
+```
+
+- 每个分片一个遍历项（目录缓存会保留一个分片的行，直到其四个文件之一发生变化）；
+  某行的定位符为 `<shard>/<key>`，其大小取自 manifest。
+- 探测会读取每个样本的图与元数据各一次，以存储 `prompt_chars`：
+  图的完整细节提示文本，加上每个顶层元数据字符串，
+  即该样本任意 `gbc` 描述文本的上界（规划器的文本估算读取该列）。
+- `open(locator)` 是存储的图像字节；`record(locator)` 是图与元数据。
+  读取器在每个进程中首次使用它们时才打开其文件。
+- GBC 的框是存储图像的比例。描述文本遵循该行的中心裁剪与目标尺寸（见下文），
+  因此 `gbc` 描述文本会拒绝 `CROP="random"`、`RESOLUTION_MODE="shifted_square"` 和 `FLIP`。
+
+<a id="gbc-captions"></a>
+## GBC 描述文本
+
+`gbc` 模板用三步把样本的记录变成描述文本：区块、格式、抽取。
+
+**区块。**
+
+| 区块 | 来源 |
+| --- | --- |
+| 元数据区块（任意名称） | `meta`：每个区块一条 `{name: rule}`，或 `meta_formatter`：指向 `f(meta) -> {name: str or [str]}` 的点分路径 |
+| `tags` | 每个样本按权重从 `tags["sources"]` 中取一个：`"meta:<field>"`（一个元数据列表）或 `"graph:root"`（图中根节点的标签） |
+| `nl` | 根节点的长描述文本；以概率 `nl["short"]` 改用其短描述文本（其 `short` 描述文本，否则为长描述文本的第一句） |
+| `graph` | GBC 提示文本（见下文） |
+
+规则取 `field`（点分路径）处的值，并把它写成条目：
+
+| 规则键 | 作用 |
+| --- | --- |
+| `bins` | `[[lower, tag], ...]`，从高到低：第一个满足 `lower <= value` 的；`""` 不写任何内容 |
+| `ranges` | `[[first, last, tag], ...]`，两端都包含 |
+| `map` | `{value: text or [texts]}` |
+| （无） | 值本身（字符串、数字或列表） |
+| `drop` | 整个区块的丢弃概率（一个 rate：数字或 `[lo, hi]`） |
+
+字段缺失，或值落在所有 bin / range / map 键之外时，不写任何内容。
+`underscores`（默认 True）在列表条目中把 `_` 转为空格；不做任何转义。
+
+每个标签列表（`tags` 的两个来源以及图的标签）都会丢弃匹配 `tags["exclude"]` 正则的条目，
+以及（不区分大小写地）`tags["dedupe"]` 所列元数据区块中的条目
+（例如标注器的 `rating:*` 标签，或画师区块已经包含的名字）。
+
+**格式。** `formats` 是一个加权的区块顺序列表。样本按权重在它具备其内容区块
+（`tags`、`nl`、`graph`）的格式中抽取；没有条目的元数据区块会被略去。
+条目用 `list_sep`（`", "`）连接；一个区块之后，文本区块（`nl`、`graph`，按写入原样结尾）
+接 `text_sep`（`"\n"`），其他区块接 `section_sep`（`",\n"`）；`prefix` / `suffix`
+包裹整条描述文本。格式还可以带 `requires`（样本必须在其中有条目的元数据区块，
+否则该格式不会被它抽到，例如给带画师的帖子用的纯画师描述文本）
+和 `drop`（`{section: rate}`，在该格式中覆盖某个元数据区块或 tags 的
+（`"tags"`）丢弃率，例如某个画师在那里从不丢弃）。
+
+**概率。** 每个丢弃率（`meta` 区块的 `drop`、`tags["drop"]`、
+`graph["tag_drop"]`）和 `graph["keep"]` 都是数字或 `[lo, hi]`；区间在每条描述文本上
+均匀抽取一次，因此 `[0.0, 0.4]` 会让部分描述文本完全不做丢弃。
+固定数值则不进行抽取。
+
+**抽取。**
+
+- `tags`：所抽来源的每个标签以概率 `tags["drop"]` 丢弃，其余打乱
+  （`tags["shuffle"]`）。
+- `graph`：图的 DAG，其框映射到该行的裁剪框内（落在框外的框被丢弃，其顶点保留），
+  细节层级取自 `kohakugbc_data.prompt.detail.sample_levels`（`graph["keep"]`；
+  根节点始终为完整细节），每个展示的标签列表（包括根节点的）按标签以
+  `graph["tag_drop"]` 丢弃，并渲染在该行的训练画布上，使用渲染器的默认
+  表头与坐标（`<gbc bbox=yxyx space=abs_centralized canvas=WxH>`）。
+- **适配。** 超过文本预算（规划器估算下以字符计的 `MAX_TEXT_TOKENS`，乘以
+  `fit["margin"]`）的描述文本会以提升一档的丢弃率重抽（标签丢弃
+  `+ fit["tag_drop_step"]`，最高到 `fit["tag_drop_max"]`；keep
+  `- fit["keep_step"]`，最低到 `fit["keep_min"]`），格式与标签来源不变，直到
+  适配为止；然后抽取 `fit["fallback"]`（一个区块顺序）。元数据区块永远不会
+  被适配丢弃。
+
+每次抽取都来自 (seed, row, variant) 的描述文本生成器，因此描述文本是
+行与变体的确定函数，与其他模板一样。
 
 <a id="hostbatch"></a>
 ## HostBatch

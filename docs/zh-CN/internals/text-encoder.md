@@ -158,6 +158,16 @@ RTX 5090），绝对误差 / 相对误差：
 
 在 `ring` / `offload` 下，一轮只需移动一次权重即可处理 `ahead` 个批次。
 
+<a id="over-long-prompts"></a>
+### 过长提示词
+
+若规划器通过截断来适配某个样本的文本（`OVERLONG="truncate_text"`、`text_limit` > 0），
+该样本会保留其编码的前 `text_limit` 行。`encode(prompts, limits)` 会在执行前把每条提示词的
+token id 截断到各自的上限，因此编码器只运行该步保留的 token；编码供给会传递这些上限。
+Qwen3.5 的每一层都是因果的（门控 delta 规则、因果卷积和注意力），因此保留的行与完整提示词
+执行后再截断所得的行相等，差异在编码器的精度之内。被截断的编码绝不会写入在线缓存
+（写入器只存储未截断的编码）。
+
 <a id="quantization"></a>
 ## 量化
 

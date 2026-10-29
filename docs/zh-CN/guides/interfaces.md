@@ -1,11 +1,13 @@
 [English](../../guides/interfaces.md) | [文档索引](../README.md)
 
+<a id="external-interface-reference"></a>
 # 外部接口参考
 
 本页按当前源码核对（2026-10-23），面向 UI、启动器和 Python 调用方；不是 HTTP/RPC API，也不是版本化协议承诺。配置本身是可执行 Python，只加载可信文件。
 
 已有的 [配置](configs.md)、[脚本目录](scripts.md)、[推理](inference.md)、[日志](logging.md)、[检查点](../internals/checkpoints.md) 保留详细说明；这里补齐跨进程契约，不复制全部训练参数。`plans/ui/interface.md` 是早期调研快照，其中的数量、性能实测、`board` 后端与部分默认值不能作为当前接口规范。
 
+<a id="1-command-entry-points"></a>
 ## 1. 命令入口
 
 [pyproject.toml](../../../pyproject.toml) 注册 **3 个**本项目命令；`kogine` 由依赖 `kohaku-engine` 提供，不是本项目注册的命令。脚本的标准调用形式：
@@ -16,6 +18,7 @@ kogine run scripts/train/moss.py --config configs/user/my-lora.py --set LR=2e-4
 
 从仓库根目录运行；配置路径和普通相对路径参数按进程工作目录解释，`use_config` 的相对引用按配置文件目录解释（见[配置](configs.md)）。安装包中脚本位置由 `cli.config.validate.repo_root()` 寻找 `kohakumoss/bundle/`，`script_ref()` 返回 bundle 下的绝对脚本路径，不要假设安装后仍存在仓库相对脚本。依赖自身额外的 `kogine` 选项以已安装版本为准。
 
+<a id="kohakumoss-config"></a>
 ### kohakumoss-config
 
 源码：[cli/config/main.py](../../../src/kohakumoss/cli/config/main.py) 的 `build_parser`、`build_from_parser`、`main`。
@@ -32,6 +35,7 @@ kogine run scripts/train/moss.py --config configs/user/my-lora.py --set LR=2e-4
 
 `--out` 未设：checkout 写入仓库 `configs/user/`，bundle 安装写入当前目录。已存在文件默认拒绝；`--force` 才覆盖。创建配置时 `blocking()` 仅按问题文本是否包含 `does not exist` 过滤缺路径问题并警告；`check` 和实际训练不作这个豁免。配置解析/I/O 异常直接传播，不保证总能返回问题列表。参数语法错误由 argparse exit 2；正常返回为 0，字符串 `SystemExit` 为失败（常规 Python CLI exit 1）。
 
+<a id="doctor--tune"></a>
 ### doctor / tune
 
 | 命令 | 参数与默认值 | 结果与副作用 |
@@ -41,6 +45,7 @@ kogine run scripts/train/moss.py --config configs/user/my-lora.py --set LR=2e-4
 
 源码：[doctor.main/report](../../../src/kohakumoss/cli/doctor.py)、[tune.main/tune](../../../src/kohakumoss/cli/tune.py)。doctor 报告包含 `os/os_release/python/torch_cuda/packages/devices/missing/msvc/compilers/kernels/backend_status/backend_failures`，`--memory` 增加 `memory_plans`。`missing` 非空或报告含失败并不会自动令命令非零退出；调用方须检查字段。不要把报告中部分路径脱敏理解为所有数据都经过保密审查。tune 的 Python 返回值是本次运行的问题数量，CLI 不将这个数量作为退出码；异常仍传播。
 
+<a id="kogine-scripts-and-key-defaults"></a>
 ### kogine 脚本与主要默认值
 
 参数为模块顶层大写 knob，用 `--set KEY=VALUE` 重复覆盖。配置、覆盖值需要按脚本 schema 转换；不能把字符串当作已验证的布尔/数值。完整脚本集合见[脚本目录](scripts.md)。
@@ -55,6 +60,7 @@ kogine run scripts/train/moss.py --config configs/user/my-lora.py --set LR=2e-4
 
 数据准备主要入口为 `scripts/data/inspect_data.py`、`cache_text.py`、`cache_latents.py`；另有 catalog 构建、cache 合并/清理命令，见[数据指南](datasets.md)与脚本目录。这些入口可能扫描、编码或写缓存，不是纯 schema 查询。
 
+<a id="2-run-and-file-contract"></a>
 ## 2. run 与文件契约
 
 来源：[training.entry.run/_start/worker](../../../src/kohakumoss/training/entry.py)、[training.knobs.run_name/check](../../../src/kohakumoss/training/knobs.py)、[logging.sinks](../../../src/kohakumoss/logging/sinks.py)。
@@ -88,6 +94,7 @@ kogine run scripts/train/moss.py --config configs/user/my-lora.py --set LR=2e-4
 
 显式恢复路径不经 latest 的完整性筛选；文件损坏/缺失可能抛出 I/O、JSON、tensor 加载异常，缺少当前 rank 的 RNG 文件抛 `FileNotFoundError`。不要由 UI 反序列化 `.pt` 来展示状态，也不要修改 checkpoint 内容。
 
+<a id="3-reading-metricsjsonl"></a>
 ## 3. metrics.jsonl 读取协议
 
 [ConsoleLogger.log/resume_at](../../../src/kohakumoss/logging/sinks.py)、[LogMetrics/Throughput](../../../src/kohakumoss/training/callbacks/monitor.py) 是实际写入方。
@@ -112,6 +119,7 @@ kogine run scripts/train/moss.py --config configs/user/my-lora.py --set LR=2e-4
 
 恢复到 step S 时，`resume_at(S)` 关闭流，将 `step>S` 行写到新的 `metrics.N.jsonl`，原文件直接重写为保留行再追加；无后续行则无需重写。其 step 解析失败按 -1 保留，故残缺/坏行不保证被清理。恢复和轮转可能改变文件内容，不能只依赖旧句柄或假设 offset 永远递增。
 
+<a id="4-lifecycle-and-failures"></a>
 ## 4. 生命周期与错误
 
 - 当前训练接口是启动进程、读取产物和进程退出；没有 HTTP 服务、暂停/继续 RPC、`status.json` 心跳或 knob 文件热加载。`config.json` 和 checkpoint `state.json` 都不是控制通道。
@@ -120,6 +128,7 @@ kogine run scripts/train/moss.py --config configs/user/my-lora.py --set LR=2e-4
 - SIGTERM 是异常式停止，不是“保存后停止”：默认 [NativeDriver.run](../../../src/kohakumoss/training/drivers/native.py) 的最终 checkpoint 在正常循环之后；[worker](../../../src/kohakumoss/training/entry.py) 的导出也在正常返回路径。已有 finally 尝试资源清理，但不保证中断当前步后生成新的 checkpoint；恢复应选最后完整 checkpoint。
 - 多卡/分布式入口可能再派生 rank 进程，`PARALLEL` 的支持边界见[多 GPU](multi-gpu.md)。启动器应管理整个作业而非只轮询一个 PID；日志没有新行并不代表死亡（可能仍在构建、缓存、调优）。以进程实际状态/退出码判断生命周期，以文件判断可恢复产物。
 
+<a id="5-reusable-python-entries"></a>
 ## 5. 可复用的 Python 入口
 
 这些是当前已有入口，不表示所有内部类都承诺跨版本兼容；UI 优先使用子进程边界，尤其不要在 GUI 主线程导入训练模块、探测设备或执行配置。
@@ -135,6 +144,7 @@ kogine run scripts/train/moss.py --config configs/user/my-lora.py --set LR=2e-4
 
 `DataConfig` 的 `CACHE_DIR=""` 在 cache 启用时取第一个含 path 的数据集根下 `cache/`；文件/通配符路径取其父目录。两个 tensor cache 均关闭时可保持空；显式 cache_dir 原样保留。完整字段见 [data.config](../../../src/kohakumoss_data/config.py) 和[数据模型](../concepts/data.md)，不要假设 dataclass 默认值全都等于训练脚本默认值。
 
+<a id="mosspipeline"></a>
 ### MossPipeline
 
 公开导入 `from kohakumoss.inference import MossPipeline, GenerateResult`，实现见 [inference.pipeline](../../../src/kohakumoss/inference/pipeline.py)，完整用法见[推理](inference.md)。

@@ -271,6 +271,72 @@ RTX 2080 Ti 和 RTX 3090 上实测比 eager 慢（2080 Ti 上 [4096, 3072] 为 0
 规划器的估算在 `auto` 下计入其字节数（`Workload.stored_precision`），各项控制项检查
 在 `auto` 下会拒绝全量微调存储文件。
 
+<a id="int8-compute"></a>
+## int8 计算
+
+`kohakumoss_kernels.int8` 为任意 int8 基础权重提供
+`int8_linear(x, q, scale, bias, group, dgrad)`：`auto` 下的 ComfyUI int8 ConvRot 文件
+（`group` 为其旋转方式）、KohakuMoss `int8` 基础权重（`group` 为 0）、经其 int8 解码的
+W4A8 基础权重。
+
+<a id="knobs"></a>
+### 控制项
+
+| 组件 | 控制项 | 取值 | 默认值 |
+| --- | --- | --- | --- |
+| DiT（训练和采样） | `INT8_COMPUTE`（`int8_compute`） | `False`（仅权重量化）、`True` | `False` |
+| DiT，训练 | `INT8_DGRAD`（`int8_dgrad`） | `int8`、`16bit` | `int8` |
+| 文本编码器 | `TEXT_ENCODE["int8_compute"]` | `False`、`True` | `False` |
+
+`set_int8_compute`（`kohakumoss.quant.bind`）会标记每个 int8 基础权重；它们各自在下一次
+`bind` 时绑定该算子（常驻、卸载和环形放置都一样，权重环形缓冲区也包括在内）。没有 int8
+基础权重时该次运行会被拒绝。仅限 CUDA：主机保留仅权重量化的普通算子。文本缓存键会记录
+`int8c`。
+
+<a id="what-runs-1"></a>
+### 运行内容
+
+| 步骤 | eager 参考实现 | Triton 后端（sm75+） |
+| --- | --- | --- |
+| x 旋转、逐行 int8 编码值与缩放值 | 以 x 的 dtype 执行 `group_hadamard_eager`，然后 `formats.quantize_rows` | `_quant_rows`：在 fp32 寄存器中旋转，求 amax，`div_rn` + `rint`，每块一次遍历 |
+| GEMM | `torch._int_mm(xq, q.t())`（int32） | 按形状由调优器（`int8_fwd`）选择 cuBLAS `_int_mm` 加 `_epilogue`，或融合的 Triton 分块（sm80+；Triton 在 sm75 上没有 int8 MMA） |
+| y = acc * s_x * s_w + b | fp32，一次舍入 | 在尾声的 fp32 寄存器中 |
+| dx（`int8`） | `Q(dy * scale) @ q`，乘以 dy 的逐行缩放值，再旋转回来 | 带列缩放值的 `_quant_rows`、在 q 的列主序副本上执行 `_int_mm`（每次调用生成，每个权重 1 字节，用后释放）、带旋转的 `_epilogue` |
+| dx（`16bit`） | `(dy (q * scale)) R` | 同上，旋转由 `rotate_2d` 完成 |
+
+输入梯度沿 N 收缩，而 N 正是权重逐行缩放值所在的轴，因此在按行量化 dy 之前先把缩放值移到
+dy 的列上：不会存储第二份权重副本。`_int_mm` 读取行主序右操作数比读取列主序的慢约 3 倍
+（RTX 3090：6144 x 9216 x 3072 时为 62 对 181 TOPS），因此 dgrad 每次调用都会转置 q
+（移动 2 x N x K 字节）。
+
+<a id="precision"></a>
+### 精度
+
+int8 计算与 fp8 计算一样都是量化计算：其比较基准不是 16 位 PyTorch。
+`tests/kernels/quant/test_int8_linear.py` 为该方案保留一个 fp64 模型（fp64 旋转、逐行编码
+值、精确的整数乘积、两个缩放值）：对编码值精确的输入，eager 参考实现与它相等；Triton 内核
+相对于它匹配 eager 参考实现且无退化（`assert_no_regression`）；缺失旋转、漏掉激活缩放值、
+未量化的激活，以及权重缩放值没有作用于 dy 的列，都会使检查失败。
+
+<a id="measured"></a>
+### 实测
+
+`int8 fwd`：int8 计算；`w-only`：仅权重量化的旋转 int8 线性层；`dense`：16 位矩阵乘法。
+设备 ms；M = 6144（DiT）/ 2048（文本编码器）。
+
+| 显卡 | 层（N x K） | dense 前向 / 前向+dgrad | w-only 前向 / 前向+dgrad | int8 前向 / 前向+dgrad (int8) / 前向+dgrad (16bit) |
+| --- | --- | --- | --- | --- |
+| RTX 3090 bf16 | qkv 9216 x 3072 | 2.64 / 5.47 | 2.74 / 6.01 | 2.14 / 4.69 / 5.79 |
+| RTX 3090 bf16 | o 3072 x 3072 | 0.98 / 1.96 | 1.02 / 2.41 | 0.85 / 1.92 / 2.24 |
+| RTX 3090 bf16 | up_gate 16384 x 3072 | 4.73 / 9.74 | 5.12 / 10.65 | 3.61 / 7.81 / 9.75 |
+| RTX 3090 bf16 | down 3072 x 8192 | 2.54 / 4.92 | 2.80 / 5.98 | 1.87 / 4.41 / 5.39 |
+| RTX 3090 bf16 | TE mlp up 24576 x 4096 | 3.17 / 6.68 | 3.76 / 7.56 | 2.40 / 6.18 / 8.03 |
+| RTX 3090 bf16 | TE mlp down 4096 x 12288 | 1.62 / 3.38 | 1.89 / 4.22 | 1.28 / 3.31 / 4.30 |
+| RTX 2080 Ti fp16 | qkv 9216 x 3072 | 4.56 / 9.08 | 4.86 / 9.97 | 3.63 / 7.67 / 9.21 |
+| RTX 2080 Ti fp16 | o 3072 x 3072 | 1.54 / 3.07 | 1.76 / 3.68 | 1.42 / 3.12 / 3.48 |
+| RTX 2080 Ti fp16 | up_gate 16384 x 3072 | 8.29 / 16.29 | 8.71 / 17.38 | 6.17 / 13.20 / 16.00 |
+| RTX 2080 Ti fp16 | down 3072 x 8192 | 4.08 / 8.14 | 4.59 / 9.56 | 3.10 / 7.18 / 8.66 |
+
 <a id="fp8-compute"></a>
 ## fp8 计算
 
@@ -279,7 +345,7 @@ bias, recipe)`，`kohakumoss.quant.compute.ComputeWeight.linear` 按（设备、
 一次性绑定该算子。设计遵循 KohakUwULLM 的 MXFP8 路径（其 5090 内核和测量结果是
 sm120 参考）以及 OCP MX v1.0 规范。
 
-<a id="knobs"></a>
+<a id="knobs-1"></a>
 ### 控制项
 
 | 位置 | 控制项 | 值 |
@@ -387,7 +453,7 @@ KohakUwULLM 以 MXFP8 训练完整模型，这里的全量微调也一样：
 - mxfp8 的 MOSS-Image base：文件 5.33 GB；加载到 RTX 5090 用时 1.3 s，而 bf16 加载加
   量化为 7.5 s，常驻 5.34 GiB，前向结果逐位相同。
 
-<a id="what-runs-1"></a>
+<a id="what-runs-2"></a>
 ### 运行内容
 
 GEMM 形式为 `c = Q(a) B^T`，其中 B 为 `[N, K]` 且 K 连续（前向：`a = x`、
@@ -520,7 +586,7 @@ LoRA 训练（r16、attn-mlp、1 MP、MAX_TOKENS 8192、块级梯度检查点，
 - 每步 512^2 / 2048 个 token 时，每个 fp8 调用都受启动开销限制，DiT 部分比 bf16 慢
   （0.37 s -> 0.44-0.46 s），而文本编码器耗时仍减半。
 
-<a id="precision"></a>
+<a id="precision-1"></a>
 ### 精度
 
 **参考实现。** fp8 计算层的 fp64 参考是使用其量化权重的 fp64 乘积（激活不量化）；
