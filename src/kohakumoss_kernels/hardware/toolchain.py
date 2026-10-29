@@ -126,7 +126,8 @@ def _host_rank(path: str) -> tuple[int, str]:
 
 def msvc_compilers() -> list[str]:
     """Every MSVC `cl.exe` of any host architecture: under the installs vswhere lists,
-    then under the Program Files roots (VS_ROOTS); this machine's host directory first."""
+    then under the Program Files roots (VS_ROOTS); this machine's host directory first.
+    """
     found: list[str] = []
     for root in _vswhere("-all", "-property", "installationPath"):
         found += glob.glob(

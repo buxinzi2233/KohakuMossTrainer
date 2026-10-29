@@ -37,7 +37,8 @@ PARTIAL = ".partial"
 
 def _retry_readonly(func, path, _excinfo) -> None:
     """`shutil.rmtree` onerror of a removal: Windows refuses to delete a read-only file
-    (a checkpoint copied from a backup / another host); clear that bit and retry once."""
+    (a checkpoint copied from a backup / another host); clear that bit and retry once.
+    """
     os.chmod(path, stat.S_IWRITE)
     func(path)
 

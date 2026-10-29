@@ -1,7 +1,8 @@
 """vcvars64's `set` output is captured as bytes and decoded with UTF-8, then the console's
 code page, then the ANSI code page: a clean capture feeds the delta (non-ASCII user paths
 included) and an unclean one is dropped instead of writing replacement characters into
-`os.environ`. Timeouts, return codes and the capture's flags are reported, not raised."""
+`os.environ`. Timeouts, return codes and the capture's flags are reported, not raised.
+"""
 
 import subprocess
 from pathlib import Path
