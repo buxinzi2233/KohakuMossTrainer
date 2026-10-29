@@ -1,6 +1,5 @@
-"""MFU peaks: the card name resolves to its nominal tensor-core peak (the first table
-key it contains, so "H100 PCIe" wins over "H100"), unknown cards and non-CUDA devices
-to None; on a CUDA device the visible card's peak is known."""
+"""MFU peaks: known cards use their nominal tensor-core peak; unknown cards and
+non-CUDA devices return None. Desktop peaks never stand in for laptop GPUs."""
 
 import pytest
 import torch
@@ -17,6 +16,10 @@ CASES = {
     "NVIDIA GeForce RTX 3060": 25.6,
     "Tesla T10": 68.8,
     "Some Future GPU": None,
+    "NVIDIA GeForce RTX 4070 Laptop GPU": None,
+    "NVIDIA GeForce RTX 4090 Laptop GPU": None,
+    "NVIDIA GeForce RTX 5090 Laptop GPU": None,
+    "NVIDIA GeForce RTX 3060 Laptop GPU": None,
 }
 
 
@@ -41,6 +44,13 @@ def test_peak_by_name(monkeypatch):
 @pytest.mark.cuda
 def test_peak_known():
     name = torch.cuda.get_device_name(torch.device("cuda"))
-    want = next((v for k, v in PEAK_TFLOPS if k in name), None)
-    assert want is not None, f"no PEAK_TFLOPS entry for {name}"
-    assert peak_tflops(torch.device("cuda")) == want > 0, name
+    matches = [
+        v
+        for k, v in PEAK_TFLOPS
+        if k in name and ("Laptop" not in name or "Laptop" in k)
+    ]
+    actual = peak_tflops(torch.device("cuda"))
+    if matches:
+        assert actual == matches[0] > 0, name
+    else:
+        assert actual is None, f"invented PEAK_TFLOPS for {name}: {actual}"

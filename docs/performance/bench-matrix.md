@@ -380,6 +380,11 @@ The bound class of a speed run:
 
 ### Nominal peaks
 
+Unknown cards return no nominal peak and no nominal MFU. In particular, a `Laptop`
+GPU never inherits a desktop card's peak from a shared model number; its power and
+clock configuration needs its own verified entry. The dry-run planner uses the
+explicit `plan_tflops` estimate for unknown cards, not a measured performance claim.
+
 Nominal MFU (the trainer's `mfu`, the report's MFU column) divides the model TFLOP/s by
 `kohakumoss/model/flops.py` `PEAK_TFLOPS`, matched as a substring of the device name (first
 match wins). Every value is the dense peak (no 2:4 sparsity) of FP16 / BF16 tensor-core

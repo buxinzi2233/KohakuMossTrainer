@@ -343,6 +343,16 @@ def test_host_ram_estimate_and_budget():
     must_fail(lambda: _same(small, big), "act offload not counted")
 
 
+@pytest.mark.parametrize(
+    "name", ("Some Future GPU", "NVIDIA GeForce RTX 4090 Laptop GPU")
+)
+def test_plan_unknown_peak_uses_explicit_estimate(name):
+    opts = Options(plan_tflops=37.0)
+    card = Card(0, name, 16.0, 89)
+    assert dry_run.peak(card, opts) == opts.plan_tflops
+    must_fail(lambda: _same(dry_run.peak(card, opts), 165.2), "desktop peak guessed")
+
+
 def test_plan_wall_spreads_units():
     opts = Options()
     card = Card(0, "NVIDIA GeForce RTX 5090", 32.0, 120)

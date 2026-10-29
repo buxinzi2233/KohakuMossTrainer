@@ -246,6 +246,8 @@ ncu 进程失败（sudo、不支持的指标）记为 `profile-failed`：加入�
 <a id="nominal-peaks"></a>
 ### 标称峰值
 
+未知显卡不返回标称峰值，也不报告标称 MFU。特别是名称含 `Laptop` 的笔记本 GPU，不能仅凭相同型号数字套用桌面显卡峰值；其功耗和时钟配置需要独立核实。dry-run 规划器对未知显卡使用显式的 `plan_tflops` 估计值，不把它当作实测性能。
+
 标称 MFU（训练器的 `mfu`、报告的 MFU 列）用模型 TFLOP/s 除以 `kohakumoss/model/flops.py` 的 `PEAK_TFLOPS`，通过设备名称的子串匹配选择（第一个匹配项优先）。每个值都是 FP16 / BF16 张量核心输入、FP32 累加下的稠密峰值（无 2:4 稀疏），与训练器矩阵乘法使用的精度一致：
 
 | 键 | TFLOP/s | 依据 |

@@ -49,8 +49,12 @@ def peak_tflops(device: torch.device) -> float | None:
     """Nominal dense fp16/bf16 tensor-core peak (fp32 accumulate), None when unknown."""
     if device.type != "cuda":
         return None
-    name = torch.cuda.get_device_name(device)
+    return peak_tflops_by_name(torch.cuda.get_device_name(device))
+
+
+def peak_tflops_by_name(name: str) -> float | None:
+    """Nominal peak by card name; desktop entries never stand in for laptop GPUs."""
     for key, value in PEAK_TFLOPS:
-        if key in name:
+        if key in name and ("Laptop" not in name or "Laptop" in key):
             return value
     return None

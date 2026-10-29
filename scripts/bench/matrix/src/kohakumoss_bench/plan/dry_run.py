@@ -12,7 +12,7 @@ import heapq
 
 from kohakumoss.memory.estimate import block_params, total_params
 from kohakumoss.memory.profiles import PROFILES, checkpoint_mode, profile_name
-from kohakumoss.model.flops import PEAK_TFLOPS, forward_flops, step_flops
+from kohakumoss.model.flops import forward_flops, peak_tflops_by_name, step_flops
 from kohakumoss.types.arch import PRESETS
 from kohakumoss_bench.plan import matrix
 from kohakumoss_bench.plan.config import Card, Host, Options, Run
@@ -24,10 +24,8 @@ TRAINING = ("speed", "online", "cap", "coverage", "quality", "ncu", "restart")
 
 
 def peak(card: Card, opts: Options) -> float:
-    for key, value in PEAK_TFLOPS:
-        if key in card.name:
-            return value
-    return opts.plan_tflops
+    nominal = peak_tflops_by_name(card.name)
+    return opts.plan_tflops if nominal is None else nominal
 
 
 def _rate(card: Card, opts: Options) -> float:
