@@ -170,7 +170,7 @@ def _decode_env(out: bytes) -> str | None:
 
 
 def _run_vcvars(script: Path) -> tuple[dict[str, list[str]], str]:
-    """The environment change `script` makes — {VAR: ["prepend" | "set", value]} — and a
+    """The environment change `script` makes \u2014 {VAR: ["prepend" | "set", value]} \u2014 and a
     short reason when the capture timed out, failed or could not be decoded ("" else).
 
     `cmd` writes `set` in the console's OEM/ANSI code page, so the output is captured as

@@ -13,7 +13,7 @@ from kohakumoss_kernels.hardware import toolchain
 
 pytestmark = pytest.mark.cpu
 SCRIPT = Path("C:/VS/vcvars64.bat")
-# `set` output as a Chinese Windows writes it: cp936 bytes for `张` in a user path.
+# `set` output as a Chinese Windows writes it: cp936 bytes for U+5F20 in a user path.
 CP936 = (
     b"PATH=C:\\Users\\\xd5\xc5\\AppData\\Local\\Temp\r\n"
     b"INCLUDE=C:\\inc\r\n"

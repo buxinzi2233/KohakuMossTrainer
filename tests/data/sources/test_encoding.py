@@ -49,10 +49,10 @@ def test_legacy_caption_falls_back_to_the_locale_code_page(
     root = str(tmp_path / "f")
     fixtures.write(f"{root}/a.png", fixtures.png_bytes(16, 16, 4))
     caption = str(tmp_path / "f" / "a.caption")
-    fixtures.write(caption, "汉服, 微笑".encode("gbk"))
+    fixtures.write(caption, "\u6c49\u670d, \u5fae\u7b11".encode("gbk"))
     monkeypatch.setattr(locale, "getpreferredencoding", lambda *_: "gbk")
     with caplog.at_level(logging.WARNING, logger="kohakumoss_data.sources.base"):
         rows = list(SOURCES.get("folder")(root).scan())
-    assert rows[0].caption_nl == "汉服, 微笑"
+    assert rows[0].caption_nl == "\u6c49\u670d, \u5fae\u7b11"
     assert "\ufffd" not in rows[0].caption_nl
     assert caption in caplog.text

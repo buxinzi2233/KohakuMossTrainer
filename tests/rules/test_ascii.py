@@ -40,5 +40,22 @@ def test_check_sees_a_non_ascii_comment(tmp_path):
     assert offenders(tmp_path) == {"src/bad.py": [2]}
 
 
+@pytest.mark.parametrize("codepoint", (0x2014, 0x5F20, 0x6C49))
+def test_escape_preserves_unicode_without_non_ascii_source(codepoint):
+    source = 'value = "\\u' + f"{codepoint:04x}" + '"\n'
+
+    def check(text):
+        assert non_ascii(text) == []
+
+    check(source)
+    namespace = {}
+    exec(source, namespace)
+    assert namespace["value"] == chr(codepoint)
+    must_fail(
+        lambda: check(source.replace("\\u" + f"{codepoint:04x}", chr(codepoint))),
+        "a literal Unicode character in source",
+    )
+
+
 def _assert_empty(found: dict) -> None:
     assert found == {}, found
