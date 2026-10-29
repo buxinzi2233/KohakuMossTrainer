@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from kohakumoss_kernels import registry
+from tests._util.kernel_launch import require_kernel_launch
 from tests._util.negative import must_fail
 from tests.kernels.blocks.test_fused_linear import _force
 
@@ -18,12 +19,18 @@ D = 256
 K = 192
 
 
-def _impl(op, backend, device, dtype):
-    try:
-        fn = registry.resolve(op, device, dtype, backend=backend)
-        return getattr(fn, "__wrapped__", fn)
-    except registry.NoImplementationError as err:
-        pytest.skip(str(err))
+@pytest.fixture
+def impl(monkeypatch):
+    def resolve(op, backend, device, dtype):
+        try:
+            fn = registry.resolve(op, device, dtype, backend=backend)
+        except registry.NoImplementationError as err:
+            pytest.skip(str(err))
+        return require_kernel_launch(
+            getattr(fn, "__wrapped__", fn), backend, monkeypatch
+        )
+
+    return resolve
 
 
 def _seg(device) -> torch.Tensor:
@@ -71,8 +78,8 @@ def assert_layout_free(run, inputs, view=strided) -> None:
 @pytest.mark.gpu
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_rms_norm_mod_strided_modulation(backend, dtype, device):
-    fn = _impl("rms_norm_mod", backend, device, dtype)
+def test_rms_norm_mod_strided_modulation(backend, dtype, device, impl):
+    fn = impl("rms_norm_mod", backend, device, dtype)
     seg = _seg(device)
 
     def run(x, w, mod, view):
@@ -89,8 +96,8 @@ def test_rms_norm_mod_strided_modulation(backend, dtype, device):
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("r", [1.0, 0.5])
-def test_gated_residual_strided_gate(backend, dtype, r, device):
-    fn = _impl("gated_residual", backend, device, dtype)
+def test_gated_residual_strided_gate(backend, dtype, r, device, impl):
+    fn = impl("gated_residual", backend, device, dtype)
     seg = _seg(device)
 
     def run(x, o, mod, view):
@@ -107,8 +114,8 @@ def test_gated_residual_strided_gate(backend, dtype, r, device):
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("path", ("fused", "split"))
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_linear_gated_residual_strided_gate(backend, path, dtype, device):
-    fn = _impl("linear_gated_residual", backend, device, dtype)
+def test_linear_gated_residual_strided_gate(backend, path, dtype, device, impl):
+    fn = impl("linear_gated_residual", backend, device, dtype)
     forced = _force(backend, path)
     seg = _seg(device)
 

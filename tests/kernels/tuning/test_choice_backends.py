@@ -33,7 +33,7 @@ def fresh(tmp_path, monkeypatch):
 
 def _count_launches(backend: str, monkeypatch) -> dict:
     """Count kernel launches of `backend` (Triton `Launcher`, TileLang `OnDevice`)."""
-    calls = {"n": 0}
+    calls = {"n": 0, "builds": 0}
     match backend:
         case "triton":
             cls = sys.modules["kohakumoss_kernels.backends.triton._common"].Launcher
@@ -45,10 +45,18 @@ def _count_launches(backend: str, monkeypatch) -> dict:
 
             monkeypatch.setattr(cls, "_launch", launch)
         case "tilelang":
-            cls = sys.modules[
+            blockops = sys.modules[
                 "kohakumoss_kernels.backends.tilelang.blocks._blockops"
-            ].OnDevice
+            ]
+            cls = blockops.OnDevice
             orig = cls.__call__
+            compile_once = blockops.compile_once
+
+            def build(*args, **kwargs):
+                calls["builds"] += 1
+                return compile_once(*args, **kwargs)
+
+            monkeypatch.setattr(blockops, "compile_once", build)
 
             def call(self, *args):
                 calls["n"] += 1
@@ -82,7 +90,10 @@ def check_other_never_launches(op, device, monkeypatch) -> None:
     x, w, shift, scale, seg = _inputs(device)
     op(x, w, shift, scale, seg, 1e-6).float().sum().backward()
     op.decide(x, w, shift, scale, seg, 1e-6)
-    assert calls["n"] == 0, f"{other} launched {calls['n']} times under {op.backend}"
+    assert calls == {
+        "n": 0,
+        "builds": 0,
+    }, f"{other} built or launched under {op.backend}: {calls}"
 
 
 def _resolved(device):
