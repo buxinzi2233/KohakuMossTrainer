@@ -151,10 +151,20 @@ def test_sm89_mx_fp8_mma_fails():
     tile = {"gemm": "promote", "bm": 128, "bn": 128, "bk": 0, "warps": 8, "stages": 4}
     upcast = fp8_linear._fwd_runner({**tile, "acc": "upcast"}, "mx")
     _assert_no_worse(upcast(x, q, s, aux, None), refs, ref64, "sm89 mx upcast")
+    x = torch.zeros(128, 128, device="cuda", dtype=torch.float16)
+    w = torch.zeros_like(x)
+    x[:, :3] = torch.tensor([32.0, 0.25, 32.0], device="cuda")
+    w[:, :3] = torch.tensor([32.0, 0.25, -32.0], device="cuda")
+    q, s, aux = quantize_pair(w, "mx")
+    xq, xs = quantize(x, "mx", "act")
+    ref64 = deq64(xq, xs, "mx") @ deq64(q, s, "mx").T
+    assert torch.equal(ref64, torch.full_like(ref64, 0.0625))
+    refs = _pytorch(x, q, s, aux, "mx")
+    _assert_no_worse(upcast(x, q, s, aux, None), refs, ref64, "mx cancellation upcast")
     fp8_mma = fp8_linear._fwd_runner(tile, "mx")(x, q, s, aux, None)
     must_fail(
         lambda: _assert_no_worse(fp8_mma, refs, ref64, "sm89 mx fp8 MMA"),
-        "the mx promote path on the fp8 MMA on sm89",
+        "the mx promote path loses the small term between cancelling products",
     )
 
 
